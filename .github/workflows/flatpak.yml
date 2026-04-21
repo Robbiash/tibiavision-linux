@@ -1,0 +1,61 @@
+name: Flatpak
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }} bundle
+    runs-on: ubuntu-24.04
+    container:
+      image: bilelmoussaoui/flatpak-github-actions:kde-6.7
+      options: --privileged
+    strategy:
+      matrix:
+        arch: [x86_64]
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sanity-check packaging assets
+        run: |
+          test -f packaging/gg.tibiavision.Linux.desktop
+          test -f packaging/gg.tibiavision.Linux.metainfo.xml
+          if [ ! -f packaging/icon-256.png ] || [ ! -f packaging/icon-128.png ]; then
+            echo "::warning::Generating placeholder PNG icons from icon.svg"
+            dnf install -y inkscape || apt-get install -y inkscape
+            inkscape packaging/icon.svg --export-width=256 \
+              --export-filename=packaging/icon-256.png
+            inkscape packaging/icon.svg --export-width=128 \
+              --export-filename=packaging/icon-128.png
+          fi
+
+      - name: Pre-fetch Python wheels for offline flatpak build
+        run: |
+          pip download -d flatpak/wheels -r flatpak/requirements.txt
+
+      - name: Build Flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: flatpak/gg.tibiavision.Linux.yaml
+          bundle: gg.tibiavision.Linux-${{ matrix.arch }}.flatpak
+          cache-key: flatpak-builder-${{ matrix.arch }}-${{ hashFiles('flatpak/**') }}
+
+      - name: Validate AppStream metadata
+        run: |
+          flatpak run --command=appstreamcli org.flatpak.Builder validate \
+            --pedantic packaging/gg.tibiavision.Linux.metainfo.xml || true
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: gg.tibiavision.Linux-${{ matrix.arch }}
+          path: gg.tibiavision.Linux-${{ matrix.arch }}.flatpak
+          if-no-files-found: error

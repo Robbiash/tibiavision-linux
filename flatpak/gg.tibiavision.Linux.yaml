@@ -1,0 +1,82 @@
+app-id: gg.tibiavision.Linux
+runtime: org.kde.Platform
+runtime-version: '6.7'
+sdk: org.kde.Sdk
+command: tvlinux
+rename-icon: gg.tibiavision.Linux
+rename-desktop-file: gg.tibiavision.Linux.desktop
+rename-appdata-file: gg.tibiavision.Linux.metainfo.xml
+
+finish-args:
+  # Graphics + Wayland / XWayland
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+
+  # PipeWire media streams (screencast + audio out)
+  - --filesystem=xdg-run/pipewire-0
+  - --socket=pulseaudio
+
+  # XDG portals: ScreenCast (screen capture), GlobalShortcuts (global hotkeys),
+  # Desktop (common entry point), Background (autostart/tray), Notifications.
+  - --talk-name=org.freedesktop.portal.Desktop
+  - --talk-name=org.freedesktop.portal.ScreenCast
+  - --talk-name=org.freedesktop.portal.GlobalShortcuts
+  - --talk-name=org.freedesktop.portal.Background
+  - --talk-name=org.freedesktop.portal.Notifications
+
+  # System tray icon support (KDE Plasma StatusNotifierItem)
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.freedesktop.StatusNotifierWatcher
+
+  # Allow reading user-chosen sound files via the FileChooser portal. We intentionally
+  # do NOT grant blanket --filesystem access; the portal hands us a per-file descriptor.
+  # This line is left in as a safety net for older portal implementations.
+  - --filesystem=xdg-download:ro
+  - --filesystem=xdg-music:ro
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/pkgconfig
+  - /share/aclocal
+  - /man
+  - /share/man
+  - '*.a'
+  - '*.la'
+
+modules:
+  # Python GObject Introspection (GStreamer bindings) - the KDE runtime ships PyGObject
+  # via pip extras already, but we build from sdk tarballs to avoid network during build.
+  - name: python-deps
+    buildsystem: simple
+    build-commands:
+      - |
+        pip3 install --verbose --exists-action=i --no-index \
+          --find-links="file://${PWD}/wheels" \
+          --prefix=${FLATPAK_DEST} \
+          PySide6 dbus-next platformdirs structlog numpy PyGObject
+    sources:
+      - type: file
+        # The CI workflow pre-fetches wheels into ./wheels/ using
+        # `pip download -d flatpak/wheels -r flatpak/requirements.txt` so the flatpak
+        # build itself runs offline. See .github/workflows/flatpak.yml.
+        path: requirements.txt
+        dest-filename: wheels/requirements.txt
+
+  - name: tvlinux
+    buildsystem: simple
+    build-commands:
+      - pip3 install --verbose --no-deps --no-index --prefix=${FLATPAK_DEST} .
+      - install -Dm644 packaging/gg.tibiavision.Linux.desktop
+          ${FLATPAK_DEST}/share/applications/gg.tibiavision.Linux.desktop
+      - install -Dm644 packaging/gg.tibiavision.Linux.metainfo.xml
+          ${FLATPAK_DEST}/share/metainfo/gg.tibiavision.Linux.metainfo.xml
+      - install -Dm644 packaging/icon-256.png
+          ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/gg.tibiavision.Linux.png
+      - install -Dm644 packaging/icon-128.png
+          ${FLATPAK_DEST}/share/icons/hicolor/128x128/apps/gg.tibiavision.Linux.png
+    sources:
+      - type: dir
+        path: ..

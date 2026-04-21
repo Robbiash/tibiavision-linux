@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#15171c"/>
+      <stop offset="1" stop-color="#0a0c10"/>
+    </linearGradient>
+    <linearGradient id="eye" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#15a5d8"/>
+      <stop offset="1" stop-color="#0f8fbf"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="url(#bg)"/>
+  <rect x="30" y="30" width="196" height="196" rx="32" fill="none" stroke="#2a2d38" stroke-width="2"/>
+  <!-- stylized eye / monitor -->
+  <ellipse cx="128" cy="128" rx="84" ry="54" fill="none" stroke="url(#eye)" stroke-width="6"/>
+  <circle cx="128" cy="128" r="28" fill="url(#eye)"/>
+  <circle cx="118" cy="118" r="8" fill="#ffffff" fill-opacity="0.85"/>
+  <!-- corner marks evoking a region selection -->
+  <g stroke="url(#eye)" stroke-width="4" fill="none">
+    <path d="M44 44 h18 M44 44 v18"/>
+    <path d="M212 44 h-18 M212 44 v18"/>
+    <path d="M44 212 h18 M44 212 v-18"/>
+    <path d="M212 212 h-18 M212 212 v-18"/>
+  </g>
+</svg>

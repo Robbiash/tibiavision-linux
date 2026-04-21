@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>gg.tibiavision.Linux</id>
+
+  <name>TibiaVision-Linux</name>
+  <summary>BattlEye-safe screen-mirroring overlay for the Tibia Linux client</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <developer id="gg.tibiavision.linux">
+    <name>TibiaVision-Linux contributors</name>
+  </developer>
+
+  <url type="homepage">https://github.com/tibiavision-linux/tibiavision-linux</url>
+  <url type="bugtracker">https://github.com/tibiavision-linux/tibiavision-linux/issues</url>
+  <url type="help">https://github.com/tibiavision-linux/tibiavision-linux/blob/main/docs/safety.md</url>
+
+  <description>
+    <p>
+      TibiaVision-Linux mirrors any region of the official native Tibia Linux client into
+      floating, always-on-top windows you can place anywhere on your screen. Useful for
+      keeping an eye on spell cooldowns, items, the battle list, or the minimap while you
+      play.
+    </p>
+    <p>
+      The app is a pure screen-mirroring utility. It never reads game memory, never
+      injects code into the Tibia process, never reads Tibia's files, and never touches
+      the network. It uses only the standard XDG Desktop Portal ScreenCast and PipeWire
+      APIs, i.e. the same pipeline OBS Studio and Discord screen share use.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Multi-region screen mirroring with unlimited regions.</li>
+      <li>Per-region opacity, border glow, grid overlay, lock.</li>
+      <li>Profiles (save/load/import/export, cycle with a global hotkey).</li>
+      <li>Audio countdown timers with custom sounds and global hotkeys.</li>
+      <li>System tray integration.</li>
+      <li>Dark theme, frameless mirror windows, always-on-top.</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">gg.tibiavision.Linux.desktop</launchable>
+
+  <categories>
+    <category>Game</category>
+    <category>Utility</category>
+  </categories>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-04-21">
+      <description>
+        <p>Initial alpha: portal capture, multi-region mirrors, profiles, audio timers, Flatpak packaging.</p>
+      </description>
+    </release>
+  </releases>
+
+  <provides>
+    <binary>tvlinux</binary>
+  </provides>
+</component>

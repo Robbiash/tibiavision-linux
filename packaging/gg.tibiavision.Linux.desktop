@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=TibiaVision-Linux
+GenericName=Tibia Overlay
+Comment=BattlEye-safe multi-region screen-mirroring overlay for the Tibia Linux client
+Exec=tvlinux
+Icon=gg.tibiavision.Linux
+Terminal=false
+Categories=Game;Utility;
+Keywords=tibia;overlay;mirror;pipewire;screencast;
+StartupWMClass=tibiavision-linux
+StartupNotify=true
+X-Flatpak=gg.tibiavision.Linux
+X-GNOME-UsesNotifications=true

@@ -1,0 +1,99 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tvlinux"
+version = "0.1.0"
+description = "TibiaVision-Linux: BattlEye-safe screen-mirroring overlay for the native Tibia Linux client."
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.11"
+authors = [{ name = "TibiaVision-Linux contributors" }]
+keywords = ["tibia", "overlay", "screen-mirror", "wayland", "pipewire", "kde", "bazzite"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment",
+    "Topic :: Multimedia :: Graphics :: Capture :: Screen Capture",
+]
+dependencies = [
+    "PySide6>=6.7",
+    "dbus-next>=0.2.3",
+    "PyGObject>=3.48",
+    "platformdirs>=4.2",
+    "structlog>=24.1",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8.2",
+    "pytest-qt>=4.4",
+    "pre-commit>=3.8",
+    "types-PyYAML",
+]
+# v2 AI stack. Kept in extras so v1 remains lean.
+ai = [
+    "opencv-python-headless>=4.10",
+    "pytesseract>=0.3.10",
+    "onnxruntime>=1.18",
+]
+
+[project.urls]
+Homepage = "https://github.com/tibiavision-linux/tibiavision-linux"
+Issues = "https://github.com/tibiavision-linux/tibiavision-linux/issues"
+
+[project.scripts]
+tvlinux = "tvlinux.__main__:main"
+
+[project.gui-scripts]
+tibiavision-linux = "tvlinux.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tvlinux"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pyflakes / pycodestyle
+    "I",             # isort
+    "UP",            # pyupgrade
+    "B",             # bugbear
+    "SIM",           # simplify
+    "RUF",           # ruff-specific
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict_optional = true
+warn_unused_ignores = false
+warn_redundant_casts = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+files = ["src/tvlinux"]
+
+# dbus-next exposes dynamic attributes (call_*, on_*) that mypy cannot see,
+# and GStreamer via PyGObject is entirely dynamic. Relax checks for those.
+[[tool.mypy.overrides]]
+module = ["tvlinux.portal", "tvlinux.shortcuts", "tvlinux.capture"]
+disable_error_code = ["attr-defined", "arg-type"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
