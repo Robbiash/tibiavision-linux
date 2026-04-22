@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import UUID
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QTimer, Signal
 from PySide6.QtGui import QAction, QIcon, QImage
 from PySide6.QtWidgets import (
     QApplication,
@@ -40,6 +40,7 @@ from .profiles import ProfileManager
 from .region_picker import RegionPickerDialog
 from .regions import Region, RegionManager
 from .shortcuts import GlobalShortcutManager, ShortcutSpec
+from .snap import SNAP_THRESHOLD, MirrorGroupManager, compute_snap
 from .theme import apply as apply_theme
 
 log = get_logger(__name__)
@@ -60,6 +61,7 @@ class Application(QObject):
         self._shortcuts = GlobalShortcutManager(self)
 
         self._mirrors: dict[UUID, MirrorWindow] = {}
+        self._groups = MirrorGroupManager()
         self._last_frame: QImage | None = None
         self._picker: RegionPickerDialog | None = None
         self._audio_dialog: AudioTimersDialog | None = None
@@ -294,10 +296,11 @@ class Application(QObject):
         mirror.rename_requested.connect(self._rename_region)
         mirror.delete_requested.connect(self._delete_region)
         mirror.region_updated.connect(self._on_mirror_region_updated)
+        mirror.moved.connect(self._on_mirror_moved)
+        mirror.unlink_requested.connect(self._on_unlink_requested)
         self._mirrors[region.id] = mirror
         if region.visible:
             mirror.show()
-        # Repaint soon if we already have a frame so the mirror isn't empty.
         if self._last_frame is not None:
             mirror.set_frame(self._last_frame)
 
@@ -306,6 +309,8 @@ class Application(QObject):
         if mirror is not None:
             mirror.close()
             mirror.deleteLater()
+        self._groups.forget(region_id)
+        self._refresh_peer_flags()
 
     def _update_mirror(self, region: Region) -> None:
         mirror = self._mirrors.get(region.id)
@@ -323,6 +328,56 @@ class Application(QObject):
     def _on_mirror_region_updated(self, region: Region) -> None:
         self._regions.update(region)
         QTimer.singleShot(500, self._profiles.save_to_disk)
+
+    # -- Snap + group drag ------------------------------------------------------------
+
+    def _on_mirror_moved(self, region_id: UUID, delta: QPoint, final: bool) -> None:
+        if delta.isNull():
+            if final:
+                self._try_snap(region_id)
+            return
+        peers = self._groups.peers(region_id)
+        if peers:
+            for peer_id in peers:
+                peer = self._mirrors.get(peer_id)
+                if peer is None or not peer.isVisible():
+                    continue
+                peer._suppress_next_move = True
+                peer.move(peer.pos() + delta)
+        if final:
+            self._try_snap(region_id)
+
+    def _try_snap(self, region_id: UUID) -> None:
+        mirror = self._mirrors.get(region_id)
+        if mirror is None or not mirror.isVisible():
+            return
+        region = self._regions.get(region_id)
+        if region is None or region.locked:
+            return
+        src_rect = mirror.geometry()
+        peers = self._groups.peers(region_id)
+        for other_id, other in self._mirrors.items():
+            if other_id == region_id or other_id in peers:
+                continue
+            if not other.isVisible():
+                continue
+            other_region = self._regions.get(other_id)
+            if other_region is None or other_region.locked:
+                continue
+            snapped = compute_snap(src_rect, other.geometry(), SNAP_THRESHOLD)
+            if snapped is not None and snapped != src_rect:
+                mirror.setGeometry(snapped)
+                self._groups.join(region_id, other_id)
+                self._refresh_peer_flags()
+                return
+
+    def _on_unlink_requested(self, region_id: UUID) -> None:
+        self._groups.unlink(region_id)
+        self._refresh_peer_flags()
+
+    def _refresh_peer_flags(self) -> None:
+        for rid, mirror in self._mirrors.items():
+            mirror.set_has_peers(bool(self._groups.peers(rid)))
 
     # -- Profiles ---------------------------------------------------------------------
 

@@ -23,6 +23,7 @@ from PySide6.QtCore import (
     QRectF,
     QSize,
     Qt,
+    QTimer,
     Signal,
 )
 from PySide6.QtGui import (
@@ -58,6 +59,10 @@ class MirrorWindow(QWidget):
     rename_requested = Signal(UUID, str)
     delete_requested = Signal(UUID)
     region_updated = Signal(Region)  # emitted on geometry / lock / visibility changes
+    # Emitted while the user drags the window. ``delta`` is the offset from the
+    # previous position; ``final`` is True once the drag settles (80 ms debounce).
+    moved = Signal(UUID, QPoint, bool)
+    unlink_requested = Signal(UUID)
 
     def __init__(self, region: Region, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -65,6 +70,16 @@ class MirrorWindow(QWidget):
         self._source_image: QImage | None = None
         self._hover_edge: int = 0
         self._glow_phase: float = 0.0
+        self._last_pos: QPoint = QPoint()
+        # Prevents a moveEvent driven by group-delta replay from re-emitting
+        # ``moved`` and causing a feedback loop.
+        self._suppress_next_move: bool = False
+        self._has_peers: bool = False
+        self._move_debounce = QTimer(self)
+        self._move_debounce.setSingleShot(True)
+        self._move_debounce.setInterval(80)
+        self._move_debounce.timeout.connect(self._emit_final_move)
+        self._last_delta: QPoint = QPoint()
 
         flags = (
             Qt.WindowType.FramelessWindowHint
@@ -88,6 +103,7 @@ class MirrorWindow(QWidget):
             self.resize(max(region.rect.width(), 200), max(region.rect.height(), 200))
         else:
             self.setGeometry(region.geometry)
+        self._last_pos = self.pos()
 
         self._glow_anim = QPropertyAnimation(self, b"glow_phase_prop", self)
         self._glow_anim.setStartValue(0.0)
@@ -342,7 +358,28 @@ class MirrorWindow(QWidget):
 
     def moveEvent(self, event: QMoveEvent) -> None:
         super().moveEvent(event)
+        new_pos = self.pos()
+        delta = new_pos - self._last_pos
+        self._last_pos = new_pos
         self._persist_geometry()
+        if self._suppress_next_move:
+            self._suppress_next_move = False
+            return
+        if delta.isNull():
+            return
+        self._last_delta = delta
+        self.moved.emit(self._region.id, delta, False)
+        self._move_debounce.start()
+
+    def _emit_final_move(self) -> None:
+        self.moved.emit(self._region.id, self._last_delta, True)
+
+    def set_has_peers(self, has_peers: bool) -> None:
+        """Let the owner tell us whether this mirror is part of a group.
+
+        Used only to enable/disable the ``Unlink from group`` context action.
+        """
+        self._has_peers = bool(has_peers)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -388,10 +425,15 @@ class MirrorWindow(QWidget):
         act_grid.setCheckable(True)
         act_grid.setChecked(self._region.grid)
         menu.addSeparator()
+        act_unlink = menu.addAction("Unlink from group")
+        act_unlink.setEnabled(self._has_peers)
         act_delete = menu.addAction("Delete region")
 
         chosen = menu.exec(global_pos)
         if chosen is None:
+            return
+        if chosen is act_unlink:
+            self.unlink_requested.emit(self._region.id)
             return
         if chosen is act_lock:
             self._region.locked = not self._region.locked
