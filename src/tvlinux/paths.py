@@ -38,3 +38,8 @@ def settings_path() -> Path:
 
 def audio_timers_path() -> Path:
     return config_dir() / "audio_timers.json"
+
+
+def triggers_path() -> Path:
+    """Path to the user's trigger-engine rules (see :mod:`tvlinux.trigger_engine`)."""
+    return config_dir() / "triggers.json"
