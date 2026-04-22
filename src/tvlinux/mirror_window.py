@@ -122,12 +122,15 @@ class MirrorWindow(QWidget):
             self._glow_anim.start()
         elif not region.border_glow and self._glow_anim.state() == QPropertyAnimation.State.Running:
             self._glow_anim.stop()
+        # Apply geometry before show(); on Wayland, the compositor can
+        # otherwise pick a placeholder position first and briefly flash the
+        # window in the wrong place.
+        if region.geometry and region.geometry != self.geometry():
+            self.setGeometry(region.geometry)
         if region.visible and not self.isVisible():
             self.show()
         elif not region.visible and self.isVisible():
             self.hide()
-        if region.geometry and region.geometry != self.geometry():
-            self.setGeometry(region.geometry)
         self.update()
 
     def set_frame(self, image: QImage) -> None:
@@ -356,6 +359,12 @@ class MirrorWindow(QWidget):
 
     def _persist_geometry(self) -> None:
         """Save the live window geometry back onto the region model."""
+        # Hidden frameless Tool windows on Wayland occasionally emit spurious
+        # move/resize events with compositor-chosen placeholder geometry as
+        # they are unmapped. Writing that back would clobber the real saved
+        # position, so ignore anything that arrives while we're not visible.
+        if not self.isVisible():
+            return
         new_geo = QRect(self.geometry())
         current = self._region.geometry
         if current is None or current != new_geo:
