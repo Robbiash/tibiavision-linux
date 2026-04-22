@@ -12,6 +12,7 @@ few-hundred-pixels-wide regions used for spell bars and cooldowns.
 
 from __future__ import annotations
 
+import math
 from uuid import UUID
 
 from PySide6.QtCore import (
@@ -217,20 +218,51 @@ class MirrorWindow(QWidget):
         return c
 
     def _draw_border(self, painter: QPainter, path: QPainterPath) -> None:
+        """Render the region border.
+
+        When ``border_glow`` is on, we layer two strokes to create a neon
+        bloom effect: a wide, translucent outer halo plus a solid 2 px core.
+        Both strokes draw on an inset path so the outer halo fits inside
+        the widget rect (the window frame hard-clips anything that bleeds
+        past ``self.rect()``).
+        """
         base = self._resolve_border_color()
         if self._region.border_glow:
-            # Pulse alpha using glow_phase (set by the running QPropertyAnimation).
-            import math
+            # Pulse between 0.5 and 1.0 intensity on glow_phase.
+            t = 0.75 - 0.25 * math.cos(self._glow_phase * 2 * math.pi)
+            bloom_path = self._inset_rounded_path(inset=3)
 
-            t = 0.5 - 0.5 * math.cos(self._glow_phase * 2 * math.pi)
-            color = QColor(base.red(), base.green(), base.blue(), int(120 + 135 * t))
-            pen = QPen(color, 2)
+            color_outer = QColor(base.red(), base.green(), base.blue(), int(255 * 0.20 * t))
+            pen_outer = QPen(color_outer, 6)
+            pen_outer.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen_outer)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(bloom_path)
+
+            color_core = QColor(base.red(), base.green(), base.blue(), int(255 * t))
+            pen_core = QPen(color_core, 2)
+            pen_core.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen_core)
+            painter.drawPath(bloom_path)
         else:
-            pen = QPen(base, 1.5)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(path)
+            pen = QPen(base, 2)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(path)
+
+    def _inset_rounded_path(self, inset: int) -> QPainterPath:
+        """Return a rounded-rect path inset from ``self.rect()`` by ``inset`` px.
+
+        Radius is reduced by the same amount (floor 0) so the geometry stays
+        visually concentric. Used by :meth:`_draw_border` so the bloom halo
+        has room to expand without being clipped at the widget edge.
+        """
+        radius = max(0, self._region.corner_radius - inset)
+        rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        return path
 
     def _draw_grid(self, painter: QPainter, target: QRect) -> None:
         pen = QPen(QColor(255, 255, 255, 40), 1)
