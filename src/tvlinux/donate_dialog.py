@@ -1,8 +1,12 @@
 """Donate dialog.
 
 Vibrant, frameless dialog asking the user to send Tibia Coins to
-``Sydnee Sweeney`` in-game. No network, no payment flow - it's purely
+``Sydnee Sweeney`` in-game. No network, no payment flow -- it's purely
 visual + a clipboard helper for the character name.
+
+All colors / sizes come from :mod:`tvlinux.theme` (``DonatePalette`` for the
+bright accents and the regular ``Palette`` for the neutral text), so this
+dialog participates in the same design system as the rest of the app.
 """
 
 from __future__ import annotations
@@ -26,6 +30,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .theme import TOKENS
+
 CHARACTER_NAME = "Sydnee Sweeney"
 
 
@@ -47,6 +53,9 @@ class DonateDialog(QDialog):
         self._build_ui()
 
     def _build_ui(self) -> None:
+        d = TOKENS.donate
+        t = TOKENS.type
+
         root = QVBoxLayout(self)
         root.setContentsMargins(36, 32, 36, 28)
         root.setSpacing(14)
@@ -55,7 +64,7 @@ class DonateDialog(QDialog):
         heart_font = QFont()
         heart_font.setPointSize(36)
         heart.setFont(heart_font)
-        heart.setStyleSheet("color: #ff7eb9;")
+        heart.setStyleSheet(f"color: {d.heart}; background: transparent;")
         heart.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(heart)
 
@@ -64,15 +73,15 @@ class DonateDialog(QDialog):
         headline_font.setPointSize(20)
         headline_font.setBold(True)
         headline.setFont(headline_font)
-        headline.setStyleSheet("color: white;")
+        headline.setStyleSheet("color: white; background: transparent;")
         headline.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(headline)
 
         subhead = QLabel("Send Tibia Coins in-game to:", self)
         subhead_font = QFont()
-        subhead_font.setPointSize(11)
+        subhead_font.setPointSize(t.size_caption)
         subhead.setFont(subhead_font)
-        subhead.setStyleSheet("color: rgba(255,255,255,0.8);")
+        subhead.setStyleSheet("color: rgba(255,255,255,0.8); background: transparent;")
         subhead.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(subhead)
 
@@ -84,9 +93,9 @@ class DonateDialog(QDialog):
         badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge.setStyleSheet(
             "QLabel {"
-            " color: #2a1500;"
+            f" color: {d.badge_text};"
             " background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
-            "   stop:0 #ffd86b, stop:1 #ffb23a);"
+            f"   stop:0 {d.badge_from}, stop:1 {d.badge_to});"
             " border-radius: 18px;"
             " padding: 8px 24px;"
             "}"
@@ -99,6 +108,9 @@ class DonateDialog(QDialog):
 
         self._copy_btn = QPushButton("Copy character name", self)
         self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Translucent-on-gradient buttons use rgba() literals rather than
+        # palette tokens -- they need to read against the dialog's own
+        # background, not the app chrome.
         self._copy_btn.setStyleSheet(
             "QPushButton {"
             " color: white;"
@@ -106,7 +118,7 @@ class DonateDialog(QDialog):
             " border: 1px solid rgba(255,255,255,0.35);"
             " border-radius: 10px;"
             " padding: 8px 18px;"
-            " font-size: 12px;"
+            f" font-size: {t.size_body}pt;"
             "}"
             "QPushButton:hover { background: rgba(255,255,255,0.22); }"
         )
@@ -118,7 +130,9 @@ class DonateDialog(QDialog):
         root.addLayout(copy_row)
 
         footer = QLabel("Thank you for keeping Linux Tibia alive.", self)
-        footer.setStyleSheet("color: rgba(255,255,255,0.6); font-size: 11px;")
+        footer.setStyleSheet(
+            f"color: rgba(255,255,255,0.6); background: transparent; font-size: {t.size_caption}pt;"
+        )
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(footer)
 
@@ -129,7 +143,7 @@ class DonateDialog(QDialog):
             " color: rgba(255,255,255,0.7);"
             " background: transparent;"
             " border: none;"
-            " font-size: 12px;"
+            f" font-size: {t.size_body}pt;"
             "}"
             "QPushButton:hover { color: white; }"
         )
@@ -141,15 +155,18 @@ class DonateDialog(QDialog):
         root.addLayout(close_row)
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        d = TOKENS.donate
+        r = TOKENS.radius
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         path = QPainterPath()
-        path.addRoundedRect(self.rect().adjusted(0, 0, -1, -1), 16, 16)
+        path.addRoundedRect(self.rect().adjusted(0, 0, -1, -1), r.lg + 4, r.lg + 4)
 
         gradient = QLinearGradient(0, 0, 0, self.height())
-        gradient.setColorAt(0.0, QColor("#1a1030"))
-        gradient.setColorAt(1.0, QColor("#3a0d4a"))
+        gradient.setColorAt(0.0, QColor(d.bg_top))
+        gradient.setColorAt(1.0, QColor(d.bg_bottom))
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.fillPath(path, gradient)
