@@ -35,6 +35,7 @@ from .audio_timers import AudioTimer, AudioTimerManager, AudioTimersDialog
 from .capture import CaptureCore
 from .control_panel import ControlPanel
 from .donate_dialog import DonateDialog
+from .hud_panels import AudioTimerPanel, MetronomePanel
 from .logging_config import get_logger
 from .mirror_window import MirrorWindow
 from .paths import triggers_path
@@ -42,6 +43,7 @@ from .profiles import ProfileManager
 from .region_picker import RegionPickerDialog
 from .regions import Region, RegionManager
 from .shortcuts import GlobalShortcutManager, ShortcutSpec
+from .smart_hud import SmartHud
 from .snap import SNAP_THRESHOLD, MirrorGroupManager, compute_snap
 from .theme import apply as apply_theme
 from .trigger_engine import TriggerEngine, default_rules
@@ -96,6 +98,13 @@ class Application(QObject):
         if not self._triggers.load_from_file(triggers_path()):
             self._triggers.set_rules(default_rules())
         self._triggers.rule_fired.connect(self._on_rule_fired)
+
+        # Smart HUD: strictly click-through overlay that hosts pluggable
+        # HudPanel instances. Adding a new panel is a single file + one
+        # register_panel() call below; SmartHud itself stays untouched.
+        self._hud = SmartHud(bus=self._hub, parent=None)
+        self._hud.register_panel(AudioTimerPanel(self._audio))
+        self._hud.register_panel(MetronomePanel())
 
         self._build_tray()
         self._wire_signals()
@@ -168,10 +177,15 @@ class Application(QObject):
         act_audio.triggered.connect(self._open_audio_timers)
         act_cycle = QAction("Cycle profile", menu)
         act_cycle.triggered.connect(self._cycle_profile)
+        self._act_toggle_hud = QAction("Show HUD overlay", menu)
+        self._act_toggle_hud.setCheckable(True)
+        self._act_toggle_hud.setChecked(True)
+        self._act_toggle_hud.toggled.connect(self._set_hud_visible)
         act_quit = QAction("Quit", menu)
         act_quit.triggered.connect(self._quit)
         menu.addAction(act_show)
         menu.addAction(act_audio)
+        menu.addAction(self._act_toggle_hud)
         menu.addSeparator()
         menu.addAction(act_cycle)
         menu.addSeparator()
@@ -190,8 +204,16 @@ class Application(QObject):
     def start(self) -> None:
         self._control.set_status("Requesting capture via XDG ScreenCast portal...")
         self._control.show()
+        self._hud.show()
         self._capture.start()
         self._register_shortcuts()
+
+    def _set_hud_visible(self, visible: bool) -> None:
+        """Tray-menu toggle for the Smart HUD overlay."""
+        if visible:
+            self._hud.show()
+        else:
+            self._hud.hide()
 
     def _quit(self) -> None:
         self._profiles.save_to_disk()
