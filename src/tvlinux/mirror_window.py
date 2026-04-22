@@ -20,6 +20,7 @@ from PySide6.QtCore import (
     QPoint,
     QPropertyAnimation,
     QRect,
+    QRectF,
     QSize,
     Qt,
     Signal,
@@ -72,6 +73,11 @@ class MirrorWindow(QWidget):
         )
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # WA_NoSystemBackground prevents Qt from painting the widget's palette
+        # background before paintEvent, which on NVIDIA + Wayland would otherwise
+        # leave an opaque underlay that defeats per-pixel alpha.
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAutoFillBackground(False)
         self.setMouseTracking(True)
         self.setWindowTitle(region.name)
         self.setMinimumSize(48, 48)
@@ -131,37 +137,55 @@ class MirrorWindow(QWidget):
     # -- Painting ---------------------------------------------------------------------
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        target = self.rect().adjusted(1, 1, -1, -1)
-
-        # Build a single rounded path reused for clipping the frame and stroking
-        # the border. Radius is clamped so it never exceeds half the shortest
-        # side (which would render as a weird lemon shape).
+        # Radius clamped so it never exceeds half the shortest side (which would
+        # render as a weird lemon shape).
         radius = max(0, min(self._region.corner_radius, min(self.width(), self.height()) // 2))
         clip_path = QPainterPath()
-        clip_path.addRoundedRect(self.rect(), radius, radius)
+        clip_path.addRoundedRect(QRectF(self.rect()), radius, radius)
+        target = self.rect().adjusted(1, 1, -1, -1)
 
-        painter.save()
-        painter.setClipPath(clip_path)
-        painter.setOpacity(max(0.2, min(1.0, self._region.opacity)))
+        # Render the frame into an offscreen ARGB32-premultiplied buffer first.
+        # painter.setOpacity() applied directly to drawImage() on the widget is
+        # unreliable on NVIDIA + Wayland + Qt.Tool: the compositor sometimes
+        # treats the window surface as opaque and the slider has no effect.
+        # Compositing offscreen and then blitting with setOpacity guarantees
+        # per-pixel alpha regardless of the window/compositor path.
+        buf = QImage(self.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        buf.fill(Qt.GlobalColor.transparent)
 
+        bp = QPainter(buf)
+        bp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        bp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        bp.setClipPath(clip_path)
         if self._source_image is not None:
             src = self._region.rect.intersected(self._source_image.rect())
             if not src.isEmpty():
-                painter.drawImage(target, self._source_image, src)
+                bp.drawImage(target, self._source_image, src)
             else:
-                self._draw_placeholder(painter, "Region is outside capture area")
+                self._draw_placeholder(bp, "Region is outside capture area")
         else:
-            self._draw_placeholder(painter, "Waiting for capture...")
-
+            self._draw_placeholder(bp, "Waiting for capture...")
         if self._region.grid:
-            self._draw_grid(painter, target)
-        painter.restore()
+            self._draw_grid(bp, target)
+        bp.end()
 
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+
+        # Explicit transparent clear: some compositors (NVIDIA + Wayland) do not
+        # reliably zero the backing store before paintEvent.
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+
+        painter.setOpacity(max(0.2, min(1.0, self._region.opacity)))
+        painter.drawImage(0, 0, buf)
+        painter.setOpacity(1.0)
+
+        # Border and resize grip are always drawn fully opaque so the window
+        # stays visibly "there" even at low content opacity.
         self._draw_border(painter, clip_path)
-
         if not self._region.locked:
             self._draw_resize_hint(painter)
 
