@@ -18,7 +18,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -129,6 +129,9 @@ class ControlPanel(QMainWindow):
         self._list.customContextMenuRequested.connect(self._show_list_context)
         self._list.itemChanged.connect(self._on_item_changed)
         self._list.currentItemChanged.connect(self._on_current_changed)
+        delete_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self._list)
+        delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        delete_shortcut.activated.connect(self._on_delete_current)
 
         # Per-region detail group.
         self._detail = self._build_detail_group()

@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QColor,
     QCursor,
     QImage,
+    QKeyEvent,
     QMouseEvent,
     QMoveEvent,
     QPainter,
@@ -79,6 +80,7 @@ class MirrorWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setAutoFillBackground(False)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setWindowTitle(region.name)
         self.setMinimumSize(48, 48)
 
@@ -327,6 +329,13 @@ class MirrorWindow(QWidget):
         # Nothing to do; compositor-driven move/resize completion is reported to
         # us via ``moveEvent`` and ``resizeEvent`` below.
         pass
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.delete_requested.emit(self._region.id)
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def moveEvent(self, event: QMoveEvent) -> None:
         super().moveEvent(event)
