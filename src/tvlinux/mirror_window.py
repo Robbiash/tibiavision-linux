@@ -221,35 +221,48 @@ class MirrorWindow(QWidget):
         """Render the region border.
 
         When ``border_glow`` is on, we layer two strokes to create a neon
-        bloom effect: a wide, translucent outer halo plus a solid 2 px core.
-        Both strokes draw on an inset path so the outer halo fits inside
-        the widget rect (the window frame hard-clips anything that bleeds
-        past ``self.rect()``).
+        bloom effect: a wide (18 px) translucent outer halo plus a solid
+        6 px core. When it is off, a chunky 8 px solid frame is drawn.
+        Every stroke draws on an inset path so the outer pen edge sits
+        flush with the widget boundary (the window frame hard-clips
+        anything that bleeds past ``self.rect()``).
+
+        ``path`` is retained for API compatibility with callers that might
+        want the outer clip contour; the border itself is drawn on inset
+        paths so it stays fully visible.
         """
+        del path  # reserved for future compositing passes
         base = self._resolve_border_color()
         if self._region.border_glow:
             # Pulse between 0.5 and 1.0 intensity on glow_phase.
             t = 0.75 - 0.25 * math.cos(self._glow_phase * 2 * math.pi)
-            bloom_path = self._inset_rounded_path(inset=3)
+            # Inset matches half the outer pen width so the bloom halo's
+            # outer edge sits flush with the widget edge -- no clipping,
+            # every pixel of the pen is visible.
+            bloom_path = self._inset_rounded_path(inset=9)
 
-            color_outer = QColor(base.red(), base.green(), base.blue(), int(255 * 0.20 * t))
-            pen_outer = QPen(color_outer, 6)
+            color_outer = QColor(base.red(), base.green(), base.blue(), int(255 * 0.35 * t))
+            pen_outer = QPen(color_outer, 18)
             pen_outer.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen_outer)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(bloom_path)
 
             color_core = QColor(base.red(), base.green(), base.blue(), int(255 * t))
-            pen_core = QPen(color_core, 2)
+            pen_core = QPen(color_core, 6)
             pen_core.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen_core)
             painter.drawPath(bloom_path)
         else:
-            pen = QPen(base, 2)
+            # Fat, flush-to-edge border: inset by half the pen width so the
+            # outer edge of the stroke coincides with the widget boundary
+            # (no clipping, whole pen visible, reads as a chunky frame).
+            solid_path = self._inset_rounded_path(inset=4)
+            pen = QPen(base, 8)
             pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
+            painter.drawPath(solid_path)
 
     def _inset_rounded_path(self, inset: int) -> QPainterPath:
         """Return a rounded-rect path inset from ``self.rect()`` by ``inset`` px.
