@@ -58,12 +58,12 @@ from .ui_helpers import (
 ROLE_REGION_ID = Qt.ItemDataRole.UserRole + 1
 
 PRESET_BORDER_COLORS: list[tuple[str, str]] = [
-    ("#e6342c", "Red / Exori Gran"),
-    ("#34c759", "Green / heal"),
-    ("#0f8fbf", "Blue / utility"),
-    ("#a64ae6", "Purple / strong"),
-    ("#ffa831", "Orange / buff"),
-    ("#b0b0b0", "Grey / neutral"),
+    ("#F43F5E", "Red / urgent"),
+    ("#10B981", "Green / heal"),
+    ("#00E5FF", "Cyan / utility"),
+    ("#A855F7", "Purple / strong"),
+    ("#F59E0B", "Orange / buff"),
+    ("#94A3B8", "Grey / neutral"),
 ]
 
 
@@ -95,7 +95,7 @@ class ControlPanel(QMainWindow):
         super().__init__(parent)
         self._regions = regions
         self.setWindowTitle("TibiaVision-Linux")
-        self.resize(460, 620)
+        self.resize(500, 680)
 
         self._build_ui()
         self._wire_region_manager()
@@ -107,7 +107,7 @@ class ControlPanel(QMainWindow):
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(s.md, s.sm, s.md, s.md)
+        layout.setContentsMargins(s.lg, s.md, s.lg, s.lg)
         layout.setSpacing(s.md)
 
         self._toolbar = QToolBar("Main", self)

@@ -30,7 +30,9 @@ def card(parent: QWidget | None = None) -> QFrame:
     frame.setFrameShape(QFrame.Shape.NoFrame)
     layout = QVBoxLayout(frame)
     s = TOKENS.spacing
-    layout.setContentsMargins(s.md, s.md, s.md, s.md)
+    # Generous padding: the Jurojin look leans on breathing room inside
+    # cards rather than on drop-shadows for depth.
+    layout.setContentsMargins(s.lg, s.lg, s.lg, s.lg)
     layout.setSpacing(s.sm)
     return frame
 
@@ -118,14 +120,16 @@ def apply_color_swatch(btn: QPushButton, hex_color: str) -> None:
     if not c.isValid():
         hex_color = TOKENS.palette.accent
         c = QColor(hex_color)
-    text_color = "#000000" if c.lightness() > 160 else "#ffffff"
+    # Threshold tuned for the Jurojin palette: the dark accent_fg reads
+    # well on any background brighter than mid-gray; pure white wins below.
+    text_color = TOKENS.palette.accent_fg if c.lightness() > 140 else TOKENS.palette.text_primary
     r = TOKENS.radius
     btn.setStyleSheet(
         f"QPushButton {{ background: {hex_color}; color: {text_color};"
-        f" border: 1px solid {TOKENS.palette.border_strong};"
+        f" border: 2px solid {TOKENS.palette.border_strong};"
         f" border-radius: {r.sm}px;"
         f" padding: 0 {TOKENS.spacing.sm}px;"
-        f" font-weight: {TOKENS.type.weight_medium};"
+        f" font-weight: {TOKENS.type.weight_bold};"
         " }"
     )
     btn.setText(hex_color.upper())
