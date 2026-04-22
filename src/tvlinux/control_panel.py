@@ -45,6 +45,15 @@ from .regions import Region, RegionManager
 
 ROLE_REGION_ID = Qt.ItemDataRole.UserRole + 1
 
+PRESET_BORDER_COLORS: list[tuple[str, str]] = [
+    ("#e6342c", "Red / Exori Gran"),
+    ("#34c759", "Green / heal"),
+    ("#0f8fbf", "Blue / utility"),
+    ("#a64ae6", "Purple / strong"),
+    ("#ffa831", "Orange / buff"),
+    ("#b0b0b0", "Grey / neutral"),
+]
+
 
 class ControlPanel(QMainWindow):
     add_region_requested = Signal()
@@ -182,6 +191,22 @@ class ControlPanel(QMainWindow):
         style_row.addWidget(self._spin_radius)
         style_row.addStretch(1)
         layout.addLayout(style_row)
+
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("Presets"))
+        for hex_color, label in PRESET_BORDER_COLORS:
+            swatch = QPushButton()
+            swatch.setFixedSize(18, 18)
+            swatch.setToolTip(label)
+            swatch.setStyleSheet(
+                f"QPushButton {{ background: {hex_color}; border: 1px solid #222;"
+                " border-radius: 3px; } QPushButton:hover {"
+                " border: 1px solid #fff; }"
+            )
+            swatch.clicked.connect(lambda _=False, h=hex_color: self._on_preset_color_clicked(h))
+            preset_row.addWidget(swatch)
+        preset_row.addStretch(1)
+        layout.addLayout(preset_row)
 
         row2 = QHBoxLayout()
         self._chk_glow = QCheckBox("Border glow")
@@ -398,6 +423,13 @@ class ControlPanel(QMainWindow):
         if not chosen.isValid():
             return
         hex_color = chosen.name()
+        self._apply_border_color_swatch(hex_color)
+        self.border_color_requested.emit(rid, hex_color)
+
+    def _on_preset_color_clicked(self, hex_color: str) -> None:
+        rid = self._current_region_id()
+        if rid is None:
+            return
         self._apply_border_color_swatch(hex_color)
         self.border_color_requested.emit(rid, hex_color)
 
