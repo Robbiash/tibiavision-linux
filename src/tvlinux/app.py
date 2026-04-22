@@ -37,12 +37,14 @@ from .control_panel import ControlPanel
 from .donate_dialog import DonateDialog
 from .logging_config import get_logger
 from .mirror_window import MirrorWindow
+from .paths import triggers_path
 from .profiles import ProfileManager
 from .region_picker import RegionPickerDialog
 from .regions import Region, RegionManager
 from .shortcuts import GlobalShortcutManager, ShortcutSpec
 from .snap import SNAP_THRESHOLD, MirrorGroupManager, compute_snap
 from .theme import apply as apply_theme
+from .trigger_engine import TriggerEngine, default_rules
 
 log = get_logger(__name__)
 
@@ -81,6 +83,19 @@ class Application(QObject):
         # Only run the per-frame numpy conversion when there's actually an analyzer
         # listening. Default off; flipped on/off by hub registrations.
         self._hub.active_changed.connect(self._on_hub_active_changed)
+
+        # Trigger engine: subscribes to the bus and runs rule actions (the main
+        # one out of the box being "LOGIN_DETECTED -> switch_profile"). Rules
+        # come from ``triggers.json`` if the user has authored them, otherwise
+        # we install the defaults.
+        self._triggers = TriggerEngine(
+            bus=self._hub,
+            profiles=self._profiles,
+            parent=self,
+        )
+        if not self._triggers.load_from_file(triggers_path()):
+            self._triggers.set_rules(default_rules())
+        self._triggers.rule_fired.connect(self._on_rule_fired)
 
         self._build_tray()
         self._wire_signals()
@@ -128,6 +143,17 @@ class Application(QObject):
     def _on_hub_active_changed(self, active: bool) -> None:
         self._capture.buffer_output_enabled = active
         log.debug("capture.buffer_output", enabled=active)
+
+    def _on_rule_fired(self, rule_id: str) -> None:
+        """Refresh UI after a trigger-driven action (profile switch etc.).
+
+        Rules can mutate ``ProfileManager`` (e.g. ``switch_profile``). The
+        control panel caches the active-profile name in its profile list, so
+        we nudge it to re-read after every rule firing. Cheap, and avoids
+        having to teach the engine about UI internals.
+        """
+        self._refresh_profiles_ui()
+        self._control.set_status(f"Trigger fired: {rule_id}")
 
     def _build_tray(self) -> None:
         icon = QIcon(app_icon_path())
