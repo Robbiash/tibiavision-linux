@@ -11,6 +11,8 @@ from .base import Analyzer, AnalyzerFrame, Event
 
 class BattleListAnalyzer(Analyzer):
     id = "battle_list"
+    # Module docstring: OCR the battle list every ~500 ms.
+    tick_ms = 500
 
     def __init__(self) -> None:
         super().__init__()

@@ -27,6 +27,20 @@ shows them inline on a mirror window, triggers a TibiaAudio timer, or both.
 
 from __future__ import annotations
 
-from .base import Analyzer, AnalyzerFrame, AnalyzerHub, Event
+from .base import Analyzer, AnalyzerFrame, AnalyzerHub, Event, EventHandler, EventKind
 
-__all__ = ["Analyzer", "AnalyzerFrame", "AnalyzerHub", "Event"]
+# ``EventBus`` is the public name for non-analyzer consumers/producers. It is
+# the same object as :class:`AnalyzerHub` -- the hub was always a pub/sub, we
+# just give the broker role a name that doesn't scream "analyzers" at the
+# trigger engine, HUD, and widget modules that will publish/subscribe too.
+EventBus = AnalyzerHub
+
+__all__ = [
+    "Analyzer",
+    "AnalyzerFrame",
+    "AnalyzerHub",
+    "Event",
+    "EventBus",
+    "EventHandler",
+    "EventKind",
+]

@@ -18,6 +18,10 @@ from .base import Analyzer, AnalyzerFrame, Event
 
 class CooldownAnalyzer(Analyzer):
     id = "cooldown_cv"
+    # Documented in the module docstring above: "sub-sample every ~100 ms".
+    # The hub enforces this via Analyzer._should_run so the subclass does not
+    # need to track its own timer.
+    tick_ms = 100
 
     def __init__(self) -> None:
         super().__init__()
