@@ -28,6 +28,14 @@ shows them inline on a mirror window, triggers a TibiaAudio timer, or both.
 from __future__ import annotations
 
 from .base import Analyzer, AnalyzerFrame, AnalyzerHub, Event, EventHandler, EventKind
+from .battle_list import BattleListAnalyzer
+from .cooldown_cv import CooldownAnalyzer
+from .copilot import CopilotAnalyzer
+from .equipment import EquipmentAnalyzer
+from .login_name import LoginNameAnalyzer
+from .ocr import OCRAnalyzer
+from .server_log import ServerLogAnalyzer
+from .swing_timer import SwingTimerAnalyzer
 
 # ``EventBus`` is the public name for non-analyzer consumers/producers. It is
 # the same object as :class:`AnalyzerHub` -- the hub was always a pub/sub, we
@@ -39,8 +47,16 @@ __all__ = [
     "Analyzer",
     "AnalyzerFrame",
     "AnalyzerHub",
+    "BattleListAnalyzer",
+    "CooldownAnalyzer",
+    "CopilotAnalyzer",
+    "EquipmentAnalyzer",
     "Event",
     "EventBus",
     "EventHandler",
     "EventKind",
+    "LoginNameAnalyzer",
+    "OCRAnalyzer",
+    "ServerLogAnalyzer",
+    "SwingTimerAnalyzer",
 ]
