@@ -34,6 +34,7 @@ from .analyzers import AnalyzerHub
 from .audio_timers import AudioTimer, AudioTimerManager, AudioTimersDialog
 from .capture import CaptureCore
 from .control_panel import ControlPanel
+from .donate_dialog import DonateDialog
 from .logging_config import get_logger
 from .mirror_window import MirrorWindow
 from .profiles import ProfileManager
@@ -116,6 +117,7 @@ class Application(QObject):
         self._control.import_profile_requested.connect(self._import_profile)
         self._control.export_profile_requested.connect(self._export_profile)
         self._control.open_audio_timers_requested.connect(self._open_audio_timers)
+        self._control.donate_requested.connect(self._show_donate)
 
         # Region model -> mirrors
         self._regions.region_added.connect(self._create_mirror)
@@ -425,6 +427,10 @@ class Application(QObject):
         self._control.set_status(f"Switched to profile '{target}'.")
 
     # -- Audio timers + shortcuts -----------------------------------------------------
+
+    def _show_donate(self) -> None:
+        dlg = DonateDialog(self._control)
+        dlg.exec()
 
     def _open_audio_timers(self) -> None:
         if self._audio_dialog is None:

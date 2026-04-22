@@ -77,6 +77,7 @@ class ControlPanel(QMainWindow):
     import_profile_requested = Signal()
 
     open_audio_timers_requested = Signal()
+    donate_requested = Signal()
 
     def __init__(self, regions: RegionManager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -108,6 +109,7 @@ class ControlPanel(QMainWindow):
         self._act_unlock_all = QAction(QIcon.fromTheme("object-unlocked"), "Unlock all", self)
         self._act_audio = QAction(QIcon.fromTheme("audio-volume-high"), "Audio timers", self)
         self._act_about = QAction(QIcon.fromTheme("help-about"), "About", self)
+        self._act_donate = QAction(QIcon.fromTheme("emblem-favorite"), "Donate", self)
         for a in (
             self._act_add,
             self._act_delete,
@@ -117,6 +119,7 @@ class ControlPanel(QMainWindow):
             self._act_unlock_all,
             self._act_audio,
             self._act_about,
+            self._act_donate,
         ):
             self._toolbar.addAction(a)
             if a in (self._act_delete, self._act_unlock_all, self._act_audio):
@@ -130,6 +133,7 @@ class ControlPanel(QMainWindow):
         self._act_unlock_all.triggered.connect(lambda: self.lock_all_requested.emit(False))
         self._act_audio.triggered.connect(self.open_audio_timers_requested.emit)
         self._act_about.triggered.connect(self._show_about)
+        self._act_donate.triggered.connect(self.donate_requested.emit)
 
         # Region list.
         self._list = QListWidget(self)
