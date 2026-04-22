@@ -44,14 +44,13 @@ from .about_dialog import AboutDialog
 from .regions import Region, RegionManager
 from .theme import TOKENS
 from .ui_helpers import (
+    CollapsibleCard,
     apply_color_swatch,
-    card,
     color_picker_button,
     default_icon_size,
     hline,
     icon,
     pill_button,
-    section_label,
     swatch_button,
 )
 
@@ -152,16 +151,13 @@ class ControlPanel(QMainWindow):
         self._act_about.triggered.connect(self._show_about)
         self._act_donate.triggered.connect(self.donate_requested.emit)
 
-        # Region list header + list, inside a card.
-        regions_card = card(self)
-        header_row = QHBoxLayout()
-        self._regions_header = section_label("REGIONS", regions_card)
-        self._regions_count = QLabel("0", regions_card)
+        # Region list card (collapsible). The count stays pinned in the
+        # header so users see it even when the card is collapsed.
+        regions_card = CollapsibleCard("REGIONS", self)
+        self._regions_card = regions_card
+        self._regions_count = QLabel("0 regions", regions_card)
         self._regions_count.setProperty("role", "muted")
-        header_row.addWidget(self._regions_header)
-        header_row.addStretch(1)
-        header_row.addWidget(self._regions_count)
-        regions_card.layout().addLayout(header_row)  # type: ignore[union-attr]
+        regions_card.add_header_widget(self._regions_count)
 
         self._list = QListWidget(regions_card)
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
@@ -172,12 +168,12 @@ class ControlPanel(QMainWindow):
         delete_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self._list)
         delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
         delete_shortcut.activated.connect(self._on_delete_current)
-        regions_card.layout().addWidget(self._list)  # type: ignore[union-attr]
+        regions_card.body_layout.addWidget(self._list)
 
-        # Per-region detail (scrolls; three cards inside).
+        # Per-region detail (scrolls; three collapsible cards inside).
         self._detail = self._build_detail_scroll()
 
-        # Profiles card.
+        # Profiles card (also collapsible).
         profiles_card = self._build_profiles_card()
 
         layout.addWidget(regions_card, 1)
@@ -219,20 +215,17 @@ class ControlPanel(QMainWindow):
         inner.setEnabled(False)
         return scroll
 
-    def _build_appearance_card(self, parent: QWidget) -> QFrame:
-        frame = card(parent)
-        layout = frame.layout()
-        assert isinstance(layout, QVBoxLayout)
-
-        layout.addWidget(section_label("APPEARANCE", frame))
+    def _build_appearance_card(self, parent: QWidget) -> CollapsibleCard:
+        c = CollapsibleCard("APPEARANCE", parent)
+        layout = c.body_layout
 
         opacity_row = QHBoxLayout()
-        opacity_row.addWidget(QLabel("Opacity", frame))
-        self._opacity_slider = QSlider(Qt.Orientation.Horizontal, frame)
+        opacity_row.addWidget(QLabel("Opacity", c))
+        self._opacity_slider = QSlider(Qt.Orientation.Horizontal, c)
         self._opacity_slider.setRange(20, 100)
         self._opacity_slider.setValue(100)
         self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
-        self._opacity_value = QLabel("100%", frame)
+        self._opacity_value = QLabel("100%", c)
         self._opacity_value.setMinimumWidth(36)
         self._opacity_value.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -241,22 +234,19 @@ class ControlPanel(QMainWindow):
         opacity_row.addWidget(self._opacity_value)
         layout.addLayout(opacity_row)
 
-        self._chk_grid = QCheckBox("Grid overlay", frame)
+        self._chk_grid = QCheckBox("Grid overlay", c)
         layout.addWidget(self._chk_grid)
         self._chk_grid.toggled.connect(self._on_grid_toggled)
 
-        return frame
+        return c
 
-    def _build_border_card(self, parent: QWidget) -> QFrame:
-        frame = card(parent)
-        layout = frame.layout()
-        assert isinstance(layout, QVBoxLayout)
-
-        layout.addWidget(section_label("BORDER", frame))
+    def _build_border_card(self, parent: QWidget) -> CollapsibleCard:
+        c = CollapsibleCard("BORDER", parent)
+        layout = c.body_layout
 
         color_row = QHBoxLayout()
-        color_row.addWidget(QLabel("Color", frame))
-        self._btn_border_color = color_picker_button(frame)
+        color_row.addWidget(QLabel("Color", c))
+        self._btn_border_color = color_picker_button(c)
         self._btn_border_color.clicked.connect(self._on_border_color_clicked)
         self._current_border_color = "#0f8fbf"
         self._apply_border_color_swatch(self._current_border_color)
@@ -266,19 +256,19 @@ class ControlPanel(QMainWindow):
 
         preset_row = QHBoxLayout()
         preset_row.setSpacing(TOKENS.spacing.xs)
-        preset_row.addWidget(QLabel("Presets", frame))
+        preset_row.addWidget(QLabel("Presets", c))
         for hex_color, label in PRESET_BORDER_COLORS:
-            swatch = swatch_button(hex_color, label, frame)
+            swatch = swatch_button(hex_color, label, c)
             swatch.clicked.connect(lambda _=False, h=hex_color: self._on_preset_color_clicked(h))
             preset_row.addWidget(swatch)
         preset_row.addStretch(1)
         layout.addLayout(preset_row)
 
-        layout.addWidget(hline(frame))
+        layout.addWidget(hline(c))
 
         radius_row = QHBoxLayout()
-        radius_row.addWidget(QLabel("Corner radius", frame))
-        self._spin_radius = QSpinBox(frame)
+        radius_row.addWidget(QLabel("Corner radius", c))
+        self._spin_radius = QSpinBox(c)
         self._spin_radius.setRange(0, 32)
         self._spin_radius.setSuffix(" px")
         self._spin_radius.setValue(12)
@@ -287,31 +277,28 @@ class ControlPanel(QMainWindow):
         radius_row.addStretch(1)
         layout.addLayout(radius_row)
 
-        self._chk_glow = QCheckBox("Glow effect", frame)
+        self._chk_glow = QCheckBox("Glow effect", c)
         layout.addWidget(self._chk_glow)
         self._chk_glow.toggled.connect(self._on_glow_toggled)
 
-        return frame
+        return c
 
-    def _build_behavior_card(self, parent: QWidget) -> QFrame:
-        frame = card(parent)
-        layout = frame.layout()
-        assert isinstance(layout, QVBoxLayout)
+    def _build_behavior_card(self, parent: QWidget) -> CollapsibleCard:
+        c = CollapsibleCard("BEHAVIOR", parent)
+        layout = c.body_layout
 
-        layout.addWidget(section_label("BEHAVIOR", frame))
-
-        self._chk_lock = QCheckBox("Locked (ignore mouse drags)", frame)
+        self._chk_lock = QCheckBox("Locked (ignore mouse drags)", c)
         layout.addWidget(self._chk_lock)
         self._chk_lock.toggled.connect(self._on_lock_toggled)
 
-        self._chk_track_cooldown = QCheckBox("Track cooldown proc (OCR)", frame)
+        self._chk_track_cooldown = QCheckBox("Track cooldown proc (OCR)", c)
         self._chk_track_cooldown.setToolTip(
             "Use OCR to watch for cooldown drops (e.g. helmet procs) and flash the border"
         )
         layout.addWidget(self._chk_track_cooldown)
         self._chk_track_cooldown.toggled.connect(self._on_track_cooldown_toggled)
 
-        return frame
+        return c
 
     def _apply_border_color_swatch(self, hex_color: str) -> None:
         c = QColor(hex_color)
@@ -320,25 +307,22 @@ class ControlPanel(QMainWindow):
         self._current_border_color = hex_color
         apply_color_swatch(self._btn_border_color, hex_color)
 
-    def _build_profiles_card(self) -> QFrame:
-        frame = card(self)
-        layout = frame.layout()
-        assert isinstance(layout, QVBoxLayout)
-
-        layout.addWidget(section_label("PROFILES", frame))
+    def _build_profiles_card(self) -> CollapsibleCard:
+        c = CollapsibleCard("PROFILES", self)
+        layout = c.body_layout
 
         body = QHBoxLayout()
-        self._profile_list = QListWidget(frame)
+        self._profile_list = QListWidget(c)
         self._profile_list.setFixedHeight(92)
         body.addWidget(self._profile_list, 1)
 
         buttons_col = QVBoxLayout()
         buttons_col.setSpacing(TOKENS.spacing.xs)
-        self._btn_save = pill_button("Save as...", variant="primary", parent=frame)
-        self._btn_load = pill_button("Load", parent=frame)
-        self._btn_delete = pill_button("Delete", variant="danger", parent=frame)
-        self._btn_import = pill_button("Import", variant="ghost", parent=frame)
-        self._btn_export = pill_button("Export", variant="ghost", parent=frame)
+        self._btn_save = pill_button("Save as...", variant="primary", parent=c)
+        self._btn_load = pill_button("Load", parent=c)
+        self._btn_delete = pill_button("Delete", variant="danger", parent=c)
+        self._btn_import = pill_button("Import", variant="ghost", parent=c)
+        self._btn_export = pill_button("Export", variant="ghost", parent=c)
         self._btn_save.clicked.connect(self._on_save_profile)
         self._btn_load.clicked.connect(self._on_load_profile)
         self._btn_delete.clicked.connect(self._on_delete_profile)
@@ -356,7 +340,7 @@ class ControlPanel(QMainWindow):
         body.addLayout(buttons_col)
         layout.addLayout(body)
 
-        return frame
+        return c
 
     # -- Region manager wiring --------------------------------------------------------
 

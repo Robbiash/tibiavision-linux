@@ -11,9 +11,16 @@ from __future__ import annotations
 from importlib import resources
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QIcon
-from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QMouseEvent
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .theme import TOKENS
 
@@ -160,3 +167,113 @@ def icon(name: str) -> QIcon:
 
 def default_icon_size() -> QSize:
     return QSize(18, 18)
+
+
+# -- Collapsible card --------------------------------------------------------
+
+
+class _ClickableRow(QWidget):
+    """Transparent widget whose left-click emits :pyattr:`clicked`.
+
+    Used as the clickable header of :class:`CollapsibleCard` so the entire
+    header strip (not just the chevron) toggles the card.
+    """
+
+    clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class CollapsibleCard(QFrame):
+    """Card with a clickable header that hides/shows its body.
+
+    API mirrors what :func:`card` gave callers -- add children via
+    ``card.body_layout.addWidget(...)`` / ``addLayout(...)``. Extras
+    (counts, badges) can be pinned to the right side of the header via
+    :meth:`add_header_widget`.
+
+    Header clicks (anywhere on the strip, not just the chevron) toggle
+    the body. Emits :pyattr:`toggled` with the new expanded state.
+    """
+
+    toggled = Signal(bool)
+
+    def __init__(
+        self,
+        title: str,
+        parent: QWidget | None = None,
+        *,
+        expanded: bool = True,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("Card")
+        self.setFrameShape(QFrame.Shape.NoFrame)
+
+        s = TOKENS.spacing
+
+        outer = QVBoxLayout(self)
+        # Tighter vertical padding than card() because the header already
+        # provides visual weight; keep horizontal lg for content breathing room.
+        outer.setContentsMargins(s.lg, s.md, s.lg, s.md)
+        outer.setSpacing(s.sm)
+
+        self._header = _ClickableRow(self)
+        self._header_row = QHBoxLayout(self._header)
+        self._header_row.setContentsMargins(0, 0, 0, 0)
+        self._header_row.setSpacing(s.sm)
+
+        self._chevron = QLabel("\u25be", self._header)  # down-pointing small triangle
+        self._chevron.setProperty("role", "muted")
+        self._chevron.setFixedWidth(12)
+        self._header_row.addWidget(self._chevron)
+
+        self._title = QLabel(title, self._header)
+        self._title.setProperty("role", "caption")
+        self._header_row.addWidget(self._title)
+
+        self._header_row.addStretch(1)
+        self._header.clicked.connect(self.toggle)
+
+        outer.addWidget(self._header)
+
+        self._body = QWidget(self)
+        self.body_layout = QVBoxLayout(self._body)
+        self.body_layout.setContentsMargins(0, s.xs, 0, 0)
+        self.body_layout.setSpacing(s.sm)
+        outer.addWidget(self._body)
+
+        self._expanded = True
+        if not expanded:
+            self.set_expanded(False)
+
+    def add_header_widget(self, widget: QWidget) -> None:
+        """Pin ``widget`` to the right-hand side of the header.
+
+        Useful for counts / badges that should stay visible even when the
+        card is collapsed (they render next to the title).
+        """
+        self._header_row.addWidget(widget)
+
+    def set_expanded(self, on: bool) -> None:
+        if on == self._expanded:
+            return
+        self._expanded = on
+        self._body.setVisible(on)
+        # Right-pointing triangle when collapsed, down-pointing when expanded.
+        self._chevron.setText("\u25be" if on else "\u25b8")
+        self.toggled.emit(on)
+
+    def toggle(self) -> None:
+        self.set_expanded(not self._expanded)
+
+    def is_expanded(self) -> bool:
+        return self._expanded
