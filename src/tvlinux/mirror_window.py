@@ -12,7 +12,6 @@ few-hundred-pixels-wide regions used for spell bars and cooldowns.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from uuid import UUID
 
 from PySide6.QtCore import (
@@ -30,6 +29,7 @@ from PySide6.QtGui import (
     QCursor,
     QImage,
     QMouseEvent,
+    QMoveEvent,
     QPainter,
     QPaintEvent,
     QPen,
@@ -42,12 +42,11 @@ from .regions import Region
 RESIZE_MARGIN = 6  # pixels from edge considered an "edge" for resizing
 
 
-@dataclass
-class _DragState:
-    mode: str  # "move" | "resize"
-    edge: int = 0  # bitmask: 1=L, 2=R, 4=T, 8=B
-    anchor_global: QPoint = field(default_factory=QPoint)
-    anchor_geometry: QRect = field(default_factory=QRect)
+# Edge bitmask: 1=Left, 2=Right, 4=Top, 8=Bottom
+_EDGE_LEFT = 1
+_EDGE_RIGHT = 2
+_EDGE_TOP = 4
+_EDGE_BOTTOM = 8
 
 
 class MirrorWindow(QWidget):
@@ -61,7 +60,6 @@ class MirrorWindow(QWidget):
         super().__init__(parent)
         self._region = region
         self._source_image: QImage | None = None
-        self._drag: _DragState | None = None
         self._hover_edge: int = 0
         self._glow_phase: float = 0.0
         self._glow_color = QColor(0, 200, 255)
@@ -220,79 +218,77 @@ class MirrorWindow(QWidget):
         """Return a bitmask indicating which edges (if any) ``pos`` is on."""
         e = 0
         if pos.x() <= RESIZE_MARGIN:
-            e |= 1
+            e |= _EDGE_LEFT
         if pos.x() >= self.width() - RESIZE_MARGIN:
-            e |= 2
+            e |= _EDGE_RIGHT
         if pos.y() <= RESIZE_MARGIN:
-            e |= 4
+            e |= _EDGE_TOP
         if pos.y() >= self.height() - RESIZE_MARGIN:
-            e |= 8
+            e |= _EDGE_BOTTOM
         return e
 
     @staticmethod
     def _cursor_for_edge(edge: int) -> Qt.CursorShape:
-        if edge in (1 | 4, 2 | 8):
+        if edge in (_EDGE_LEFT | _EDGE_TOP, _EDGE_RIGHT | _EDGE_BOTTOM):
             return Qt.CursorShape.SizeFDiagCursor
-        if edge in (2 | 4, 1 | 8):
+        if edge in (_EDGE_RIGHT | _EDGE_TOP, _EDGE_LEFT | _EDGE_BOTTOM):
             return Qt.CursorShape.SizeBDiagCursor
-        if edge in (1, 2):
+        if edge in (_EDGE_LEFT, _EDGE_RIGHT):
             return Qt.CursorShape.SizeHorCursor
-        if edge in (4, 8):
+        if edge in (_EDGE_TOP, _EDGE_BOTTOM):
             return Qt.CursorShape.SizeVerCursor
         return Qt.CursorShape.OpenHandCursor
+
+    @staticmethod
+    def _qt_edges_from_mask(edge: int) -> Qt.Edge:
+        edges: Qt.Edge = Qt.Edge(0)
+        if edge & _EDGE_LEFT:
+            edges |= Qt.Edge.LeftEdge
+        if edge & _EDGE_RIGHT:
+            edges |= Qt.Edge.RightEdge
+        if edge & _EDGE_TOP:
+            edges |= Qt.Edge.TopEdge
+        if edge & _EDGE_BOTTOM:
+            edges |= Qt.Edge.BottomEdge
+        return edges
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if self._region.locked:
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            # Delegate move/resize to the compositor. This is REQUIRED on Wayland
+            # (client-side ``self.move()`` is a no-op there) and works fine on X11.
+            wh = self.windowHandle()
+            if wh is None:
+                return
             edge = self._edge_at(event.position().toPoint())
-            self._drag = _DragState(
-                mode="resize" if edge else "move",
-                edge=edge,
-                anchor_global=event.globalPosition().toPoint(),
-                anchor_geometry=QRect(self.geometry()),
-            )
+            if edge:
+                wh.startSystemResize(self._qt_edges_from_mask(edge))
+            else:
+                wh.startSystemMove()
+            event.accept()
         elif event.button() == Qt.MouseButton.RightButton:
             self._show_context_menu(event.globalPosition().toPoint())
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        # startSystemMove/Resize takes over the gesture, so we only need to
+        # update the hover cursor while the user is NOT dragging.
         if self._region.locked:
             self.setCursor(Qt.CursorShape.ArrowCursor)
             return
-        if self._drag is None:
-            edge = self._edge_at(event.position().toPoint())
-            if edge != self._hover_edge:
-                self._hover_edge = edge
-                self.setCursor(QCursor(self._cursor_for_edge(edge)))
-            return
-
-        delta = event.globalPosition().toPoint() - self._drag.anchor_global
-        geo = QRect(self._drag.anchor_geometry)
-        if self._drag.mode == "move":
-            geo.translate(delta)
-            self.move(geo.topLeft())
-        else:
-            edge = self._drag.edge
-            if edge & 1:
-                geo.setLeft(geo.left() + delta.x())
-            if edge & 2:
-                geo.setRight(geo.right() + delta.x())
-            if edge & 4:
-                geo.setTop(geo.top() + delta.y())
-            if edge & 8:
-                geo.setBottom(geo.bottom() + delta.y())
-            # Respect minimum size.
-            if geo.width() < self.minimumWidth():
-                geo.setWidth(self.minimumWidth())
-            if geo.height() < self.minimumHeight():
-                geo.setHeight(self.minimumHeight())
-            self.setGeometry(geo)
+        edge = self._edge_at(event.position().toPoint())
+        if edge != self._hover_edge:
+            self._hover_edge = edge
+            self.setCursor(QCursor(self._cursor_for_edge(edge)))
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if self._drag is not None:
-            self._drag = None
-            self._region.geometry = QRect(self.geometry())
-            self.region_updated.emit(self._region)
+        # Nothing to do; compositor-driven move/resize completion is reported to
+        # us via ``moveEvent`` and ``resizeEvent`` below.
+        pass
+
+    def moveEvent(self, event: QMoveEvent) -> None:
+        super().moveEvent(event)
+        self._persist_geometry()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -305,8 +301,14 @@ class MirrorWindow(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        if not self._drag:
-            self._region.geometry = QRect(self.geometry())
+        self._persist_geometry()
+
+    def _persist_geometry(self) -> None:
+        """Save the live window geometry back onto the region model."""
+        new_geo = QRect(self.geometry())
+        if self._region.geometry != new_geo:
+            self._region.geometry = new_geo
+            self.region_updated.emit(self._region)
 
     def changeEvent(self, event: QEvent) -> None:
         # Nothing to do; kept for future hooks (active-window gradient, etc.).

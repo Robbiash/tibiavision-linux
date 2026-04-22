@@ -18,12 +18,15 @@ Reference:
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any
 
-from dbus_next import BusType, Variant  # type: ignore[import-not-found]
+from dbus_next import BusType, Message, Variant  # type: ignore[import-not-found]
 from dbus_next.aio import MessageBus  # type: ignore[import-not-found]
+from dbus_next.introspection import Node  # type: ignore[import-not-found]
 
 from .logging_config import get_logger
 
@@ -72,6 +75,71 @@ def _token() -> str:
     return "tv_" + secrets.token_hex(8)
 
 
+# D-Bus member name rules: ASCII [A-Za-z_][A-Za-z0-9_]* up to 255 chars.
+# Some portal backends (newer KDE / GNOME builds) expose property/signal names
+# containing hyphens (e.g. Settings.power-saver-enabled). dbus-next's strict
+# validator refuses to parse such introspection XML, which blows up the whole
+# handshake even though we never touch those interfaces. We scrub those members
+# out of the XML before handing it to dbus-next.
+_VALID_MEMBER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _sanitize_introspection_xml(xml_str: str) -> str:
+    """Strip methods/signals/properties whose names are not valid D-Bus members."""
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return xml_str
+    for iface in list(root.findall("interface")):
+        for tag in ("method", "signal", "property"):
+            for el in list(iface.findall(tag)):
+                name = el.get("name", "")
+                if not _VALID_MEMBER.match(name) or len(name) > 255:
+                    iface.remove(el)
+    return ET.tostring(root, encoding="unicode")
+
+
+async def _safe_introspect(bus: MessageBus, name: str, path: str) -> Node:
+    """Like ``bus.introspect`` but tolerant of hyphenated member names."""
+    reply = await bus.call(
+        Message(
+            destination=name,
+            path=path,
+            interface="org.freedesktop.DBus.Introspectable",
+            member="Introspect",
+        )
+    )
+    if reply is None or not reply.body:
+        return await bus.introspect(name, path)  # fall back (will likely raise)
+    xml_str = reply.body[0]
+    cleaned = _sanitize_introspection_xml(xml_str)
+    return Node.parse(cleaned)
+
+
+# Hard-coded definition of the Request interface. We cannot rely on introspection
+# for request paths: KDE's portal creates the request object lazily, so introspect
+# returns an empty node and ``get_interface("...Request")`` fails with
+# "interface not found on this object". The Request interface is part of the XDG
+# portal spec and never changes, so hardcoding is safe and spec-compliant.
+#   https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html
+_REQUEST_NODE_XML = (
+    '<node>'
+    '<interface name="org.freedesktop.portal.Request">'
+    '<method name="Close"/>'
+    '<signal name="Response">'
+    '<arg type="u" name="response"/>'
+    '<arg type="a{sv}" name="results"/>'
+    '</signal>'
+    '</interface>'
+    '</node>'
+)
+
+
+def _request_node() -> Node:
+    """Parsed Node describing only the org.freedesktop.portal.Request interface."""
+    return Node.parse(_REQUEST_NODE_XML)
+
+
 class ScreenCastPortal:
     """Async ScreenCast portal client wrapped in a small, typed facade."""
 
@@ -81,8 +149,12 @@ class ScreenCastPortal:
         self._sender: str | None = None
 
     async def connect(self) -> None:
-        self._bus = await MessageBus(bus_type=BusType.SESSION).connect()
-        introspection = await self._bus.introspect(BUS, PATH)
+        # negotiate_unix_fd is REQUIRED: OpenPipeWireRemote returns a unix_fd,
+        # and without this flag dbus-next refuses the fd and the connection EOFs.
+        self._bus = await MessageBus(
+            bus_type=BusType.SESSION, negotiate_unix_fd=True
+        ).connect()
+        introspection = await _safe_introspect(self._bus, BUS, PATH)
         proxy = self._bus.get_proxy_object(BUS, PATH, introspection)
         self._iface = proxy.get_interface(SCREENCAST_IFACE)
         # dbus-next exposes the bus' unique name (":1.xx") we need to build Request paths.
@@ -116,8 +188,9 @@ class ScreenCastPortal:
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
 
         # Subscribe to the Request before issuing the call to avoid a race.
-        req_introspection = await self._bus.introspect(BUS, expected_path)
-        req_proxy = self._bus.get_proxy_object(BUS, expected_path, req_introspection)
+        # The request object may not exist yet on KDE, so use a hardcoded spec node
+        # rather than introspecting it.
+        req_proxy = self._bus.get_proxy_object(BUS, expected_path, _request_node())
         req_iface = req_proxy.get_interface(REQUEST_IFACE)
 
         def on_response(response: int, results: dict[str, Variant]) -> None:
@@ -141,8 +214,7 @@ class ScreenCastPortal:
                 got=actual_handle,
             )
             # Some backends hand back a different request path; subscribe to that one too.
-            act_introspection = await self._bus.introspect(BUS, actual_handle)
-            act_proxy = self._bus.get_proxy_object(BUS, actual_handle, act_introspection)
+            act_proxy = self._bus.get_proxy_object(BUS, actual_handle, _request_node())
             act_proxy.get_interface(REQUEST_IFACE).on_response(on_response)
 
         try:
@@ -152,7 +224,7 @@ class ScreenCastPortal:
 
     async def _get_version(self) -> int:
         assert self._bus is not None
-        introspection = await self._bus.introspect(BUS, PATH)
+        introspection = await _safe_introspect(self._bus, BUS, PATH)
         proxy = self._bus.get_proxy_object(BUS, PATH, introspection)
         props = proxy.get_interface("org.freedesktop.DBus.Properties")
         ver = await props.call_get(SCREENCAST_IFACE, "version")  # type: ignore[attr-defined]

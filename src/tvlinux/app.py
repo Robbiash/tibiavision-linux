@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
 )
 
-from . import __app_name__
+from . import __app_name__, app_icon_path
 from .analyzers import AnalyzerHub
 from .audio_timers import AudioTimer, AudioTimerManager, AudioTimersDialog
 from .capture import CaptureCore
@@ -75,6 +75,9 @@ class Application(QObject):
         self._capture.frame_buffer_ready.connect(
             lambda arr: self._hub.on_frame_buffer(arr, self._capture.source_size)
         )
+        # Only run the per-frame numpy conversion when there's actually an analyzer
+        # listening. Default off; flipped on/off by hub registrations.
+        self._hub.active_changed.connect(self._on_hub_active_changed)
 
         self._build_tray()
         self._wire_signals()
@@ -115,8 +118,14 @@ class Application(QObject):
         self._regions.region_changed.connect(self._update_mirror)
         self._regions.regions_reset.connect(self._rebuild_mirrors)
 
+    def _on_hub_active_changed(self, active: bool) -> None:
+        self._capture.buffer_output_enabled = active
+        log.debug("capture.buffer_output", enabled=active)
+
     def _build_tray(self) -> None:
-        icon = QIcon.fromTheme("video-display", QIcon())
+        icon = QIcon(app_icon_path())
+        if icon.isNull():
+            icon = QIcon.fromTheme("video-display", QIcon())
         self._tray = QSystemTrayIcon(icon, self)
         self._tray.setToolTip(__app_name__)
         menu = QMenu()

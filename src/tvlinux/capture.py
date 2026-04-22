@@ -58,8 +58,8 @@ class CaptureCore(QObject):
     # Full source frame as QImage (zero-copy view into GStreamer-owned memory; consumers
     # must ``copy()`` if they want to keep it).
     frame_ready = Signal(QImage)
-    # Same frame as an (H, W, 4) uint8 numpy ndarray. Only materialized when at least one
-    # receiver is connected - cheap when unused.
+    # Same frame as an (H, W, 4) uint8 numpy ndarray. Materialized per frame only when
+    # ``buffer_output_enabled`` is True, so the numpy conversion stays off by default.
     frame_buffer_ready = Signal(object)
 
     def __init__(self, *, use_portal: bool = True, parent: QObject | None = None) -> None:
@@ -75,6 +75,10 @@ class CaptureCore(QObject):
         self._async_thread: threading.Thread | None = None
         self._source_size = QSize(0, 0)
         self._running = False
+        # When False we skip the (expensive) QImage -> numpy conversion. Flipped on by
+        # components that actually need buffers (e.g. AnalyzerHub when any analyzer is
+        # enabled).
+        self.buffer_output_enabled: bool = False
 
     # -- Lifecycle -------------------------------------------------------------------
 
@@ -268,7 +272,7 @@ class CaptureCore(QObject):
 
         self.frame_ready.emit(image)
 
-        if self.receivers(self.frame_buffer_ready) > 0:  # lazy numpy conversion
+        if self.buffer_output_enabled:
             arr = _qimage_to_ndarray(image)
             self.frame_buffer_ready.emit(arr)
 

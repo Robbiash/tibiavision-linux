@@ -6,7 +6,7 @@ import argparse
 import signal
 import sys
 
-from . import __app_id__, __app_name__, __version__
+from . import __app_id__, __app_name__, __version__, app_icon_path
 from .logging_config import configure_logging, get_logger
 
 
@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Import Qt lazily so --version / --help don't pay the startup cost.
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtGui import QGuiApplication, QIcon
     from PySide6.QtWidgets import QApplication
 
     QGuiApplication.setApplicationDisplayName(__app_name__)
@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    app.setWindowIcon(QIcon(app_icon_path()))
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
     from .app import Application

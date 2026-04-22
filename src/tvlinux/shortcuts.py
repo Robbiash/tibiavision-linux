@@ -20,6 +20,7 @@ from typing import Any
 from PySide6.QtCore import QObject, Signal
 
 from .logging_config import get_logger
+from .portal import _request_node, _safe_introspect
 
 log = get_logger(__name__)
 
@@ -99,7 +100,7 @@ class GlobalShortcutManager(QObject):
 
         bus = await MessageBus(bus_type=BusType.SESSION).connect()
         try:
-            intro = await bus.introspect(BUS, PATH)
+            intro = await _safe_introspect(bus, BUS, PATH)
             proxy = bus.get_proxy_object(BUS, PATH, intro)
             try:
                 iface = proxy.get_interface(IFACE)
@@ -121,8 +122,7 @@ class GlobalShortcutManager(QObject):
             loop = asyncio.get_running_loop()
             fut: asyncio.Future[dict[str, Any]] = loop.create_future()
 
-            req_intro = await bus.introspect(BUS, expected)
-            req_proxy = bus.get_proxy_object(BUS, expected, req_intro)
+            req_proxy = bus.get_proxy_object(BUS, expected, _request_node())
             req_iface = req_proxy.get_interface(REQUEST_IFACE)
 
             def on_response(response: int, results: dict[str, Variant]) -> None:
@@ -136,8 +136,7 @@ class GlobalShortcutManager(QObject):
             req_iface.on_response(on_response)
             actual = await getattr(iface, f"call_{method}")(*args, options)
             if actual != expected:
-                act_intro = await bus.introspect(BUS, actual)
-                act_proxy = bus.get_proxy_object(BUS, actual, act_intro)
+                act_proxy = bus.get_proxy_object(BUS, actual, _request_node())
                 act_proxy.get_interface(REQUEST_IFACE).on_response(on_response)
             return await fut
 

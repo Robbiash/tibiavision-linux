@@ -65,17 +65,30 @@ class AnalyzerHub(QObject):
     """
 
     event_emitted = Signal(object)  # Event
+    # True whenever at least one analyzer is registered; False otherwise. The application
+    # wires this to ``CaptureCore.buffer_output_enabled`` so the per-frame numpy
+    # conversion only runs when something actually consumes it.
+    active_changed = Signal(bool)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._analyzers: list[Analyzer] = []
 
+    def _refresh_active(self, prev_active: bool) -> None:
+        now_active = bool(self._analyzers)
+        if now_active != prev_active:
+            self.active_changed.emit(now_active)
+
     def register(self, analyzer: Analyzer) -> None:
+        prev = bool(self._analyzers)
         self._analyzers.append(analyzer)
         log.info("analyzer.registered", id=analyzer.id)
+        self._refresh_active(prev)
 
     def unregister(self, analyzer: Analyzer) -> None:
+        prev = bool(self._analyzers)
         self._analyzers = [a for a in self._analyzers if a is not analyzer]
+        self._refresh_active(prev)
 
     def on_frame_buffer(self, buf: np.ndarray, size: QSize) -> None:  # slot
         if not self._analyzers:
