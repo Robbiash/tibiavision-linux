@@ -43,3 +43,8 @@ def audio_timers_path() -> Path:
 def triggers_path() -> Path:
     """Path to the user's trigger-engine rules (see :mod:`tvlinux.trigger_engine`)."""
     return config_dir() / "triggers.json"
+
+
+def hud_layout_path() -> Path:
+    """Per-panel position overrides for the Smart HUD (see :mod:`tvlinux.smart_hud`)."""
+    return config_dir() / "hud_layout.json"
