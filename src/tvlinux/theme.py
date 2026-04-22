@@ -23,76 +23,76 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Palette:
-    """Dark-mode color palette. All values are hex ``#rrggbb`` strings."""
+    """Jurojin-inspired dark palette: deep midnight navy + electric cyan."""
 
     # Backgrounds, dark -> light.
-    bg_app: str = "#0f1115"  # main window chrome
-    bg_surface: str = "#181a1f"  # generic widget background
-    bg_elevated: str = "#1d2029"  # inputs, lists
-    bg_card: str = "#1a1d25"  # grouped content cards
-    bg_hover: str = "#262a35"
-    bg_pressed: str = "#14161b"
+    bg_app: str = "#0B0E14"  # deep midnight navy (main window chrome)
+    bg_surface: str = "#121620"  # sidebars / scroll areas
+    bg_elevated: str = "#181D29"  # inputs, dropdowns, menus
+    bg_card: str = "#151A25"  # grouped content cards
+    bg_hover: str = "#1E2536"
+    bg_pressed: str = "#0F131C"
 
-    border_subtle: str = "#272a35"
-    border_strong: str = "#3a3e4a"
+    border_subtle: str = "#222A3A"
+    border_strong: str = "#333F58"
 
-    text_primary: str = "#e9ecf3"
-    text_secondary: str = "#a0a6b8"
-    text_muted: str = "#6a7080"
+    text_primary: str = "#F8FAFC"  # clean white
+    text_secondary: str = "#94A3B8"  # cool gray
+    text_muted: str = "#475569"
 
-    accent: str = "#22a7d6"
-    accent_hover: str = "#35bce8"
-    accent_pressed: str = "#1a8ab0"
-    accent_fg: str = "#ffffff"
-    # rgba() form used for translucent selection rows.
-    accent_soft_rgba: str = "rgba(34, 167, 214, 0.18)"
+    # Signature Jurojin neon teal/cyan.
+    accent: str = "#00E5FF"
+    accent_hover: str = "#33EAFF"
+    accent_pressed: str = "#00B3CC"
+    accent_fg: str = "#0B0E14"  # high-contrast dark text on neon buttons
+    accent_soft_rgba: str = "rgba(0, 229, 255, 0.12)"
 
-    success: str = "#3ecf7a"
-    warning: str = "#f4b740"
-    danger: str = "#e05252"
-    danger_hover: str = "#ef6565"
-    danger_pressed: str = "#b83d3d"
+    success: str = "#10B981"  # neon green
+    warning: str = "#F59E0B"
+    danger: str = "#F43F5E"  # vibrant urgent rose/red
+    danger_hover: str = "#FB7185"
+    danger_pressed: str = "#E11D48"
 
 
 @dataclass(frozen=True)
 class DonatePalette:
-    """Colors exclusive to the donate dialog (vibrant on purpose).
+    """Colors exclusive to the donate dialog.
 
     Kept separate from :class:`Palette` so the global-QSS coverage test does
     not complain about these tokens being absent from the app-wide stylesheet
     -- they are consumed directly by ``donate_dialog.paintEvent``.
     """
 
-    bg_top: str = "#1a1030"
-    bg_bottom: str = "#3a0d4a"
-    badge_from: str = "#ffd86b"
-    badge_to: str = "#ffb23a"
-    badge_text: str = "#2a1500"
-    heart: str = "#ff7eb9"
+    bg_top: str = "#1A1033"  # deep rich purple fade
+    bg_bottom: str = "#0B0E14"
+    badge_from: str = "#00E5FF"
+    badge_to: str = "#00B3CC"
+    badge_text: str = "#0B0E14"
+    heart: str = "#F43F5E"
 
 
 @dataclass(frozen=True)
 class Spacing:
-    xs: int = 4
-    sm: int = 8
-    md: int = 12
-    lg: int = 16
-    xl: int = 24
+    xs: int = 6
+    sm: int = 10
+    md: int = 16
+    lg: int = 24
+    xl: int = 32
 
 
 @dataclass(frozen=True)
 class Radius:
-    sm: int = 4
-    md: int = 8
-    lg: int = 12
+    sm: int = 6
+    md: int = 10
+    lg: int = 16
     pill: int = 999
 
 
 @dataclass(frozen=True)
 class Type:
-    font_stack: str = '"Inter", "Noto Sans", "Segoe UI", sans-serif'
+    font_stack: str = '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
     size_caption: int = 11
-    size_body: int = 12
+    size_body: int = 13
     size_heading: int = 14
     size_display: int = 20
     weight_regular: int = 400
@@ -147,9 +147,9 @@ QLabel {{
 QLabel[role="caption"] {{
     color: {p.text_secondary};
     font-size: {t.size_caption}pt;
-    font-weight: {t.weight_medium};
+    font-weight: {t.weight_bold};
     text-transform: uppercase;
-    letter-spacing: 1px;
+    letter-spacing: 1.5px;
 }}
 
 QLabel[role="muted"] {{
@@ -160,7 +160,9 @@ QLabel[role="success"] {{ color: {p.success}; font-weight: {t.weight_medium}; }}
 QLabel[role="warning"] {{ color: {p.warning}; font-weight: {t.weight_medium}; }}
 QLabel[role="danger"] {{ color: {p.danger}; font-weight: {t.weight_medium}; }}
 
-/* -- Cards (QFrame#Card) ---------------------------------------------------- */
+/* -- Cards (QFrame#Card) ----------------------------------------------------
+   Glassmorphic elevated surface. Ultra-thin border for depth, no heavy
+   shadow -- depth comes from the background delta with bg_surface. */
 QFrame#Card {{
     background-color: {p.bg_card};
     border: 1px solid {p.border_subtle};
@@ -174,19 +176,22 @@ QFrame[role="hline"] {{
     border: none;
 }}
 
-/* -- Buttons ---------------------------------------------------------------- */
+/* -- Buttons ----------------------------------------------------------------
+   Default buttons are borderless -- the bg_elevated -> bg_hover transition
+   carries the affordance. Primary / danger variants are filled and bold
+   with dark accent_fg text so they pop off the neon backgrounds. */
 QPushButton {{
     background-color: {p.bg_elevated};
     color: {p.text_primary};
-    border: 1px solid {p.border_subtle};
+    border: 1px solid transparent;
     border-radius: {r.md}px;
-    padding: {s.xs}px {s.md}px;
+    padding: {s.sm}px {s.lg}px;
     min-height: 20px;
     font-weight: {t.weight_medium};
 }}
-QPushButton:hover {{ background-color: {p.bg_hover}; border-color: {p.border_strong}; }}
+QPushButton:hover {{ background-color: {p.bg_hover}; }}
 QPushButton:pressed {{ background-color: {p.bg_pressed}; }}
-QPushButton:focus {{ border-color: {p.accent}; outline: none; }}
+QPushButton:focus {{ border: 1px solid {p.accent}; outline: none; }}
 QPushButton:disabled {{
     color: {p.text_muted};
     background-color: {p.bg_surface};
@@ -195,18 +200,21 @@ QPushButton:disabled {{
 
 QPushButton[variant="primary"] {{
     background-color: {p.accent};
-    border-color: {p.accent_pressed};
     color: {p.accent_fg};
+    font-weight: {t.weight_bold};
+    border: 1px solid {p.accent_pressed};
 }}
 QPushButton[variant="primary"]:hover {{ background-color: {p.accent_hover}; }}
 QPushButton[variant="primary"]:pressed {{ background-color: {p.accent_pressed}; }}
 
 QPushButton[variant="danger"] {{
     background-color: {p.danger};
-    border-color: {p.danger_pressed};
     color: {p.accent_fg};
+    font-weight: {t.weight_bold};
+    border: 1px solid {p.danger_pressed};
 }}
 QPushButton[variant="danger"]:hover {{ background-color: {p.danger_hover}; }}
+QPushButton[variant="danger"]:pressed {{ background-color: {p.danger_pressed}; }}
 
 QPushButton[variant="ghost"] {{
     background-color: transparent;
@@ -218,9 +226,11 @@ QPushButton[variant="ghost"]:hover {{
     color: {p.text_primary};
 }}
 
-/* Preset swatches: 18x18 color chips with a hover ring. */
+/* Preset swatches: 18x18 color chips with a thick hover ring for tactile
+   feedback. Border bumped to 2 px so the chip reads as a "button" rather
+   than a plain div. */
 QPushButton[variant="swatch"] {{
-    border: 1px solid {p.border_subtle};
+    border: 2px solid {p.border_strong};
     border-radius: {r.sm}px;
     padding: 0;
     min-height: 18px;
@@ -230,7 +240,9 @@ QPushButton[variant="swatch"]:hover {{
     border: 2px solid {p.text_primary};
 }}
 
-/* -- Lists + tree ----------------------------------------------------------- */
+/* -- Lists + tree -----------------------------------------------------------
+   Selected row uses a soft translucent accent fill plus a 3 px solid leader
+   line -- classic Jurojin "active table" cue. */
 QListWidget, QListView, QTreeView {{
     background-color: {p.bg_elevated};
     border: 1px solid {p.border_subtle};
@@ -241,12 +253,12 @@ QListWidget, QListView, QTreeView {{
 QListWidget::item, QListView::item {{
     padding: {s.xs}px {s.sm}px;
     border-radius: {r.sm}px;
-    border-left: 2px solid transparent;
+    border-left: 3px solid transparent;
     color: {p.text_primary};
 }}
 QListWidget::item:selected, QListView::item:selected {{
     background-color: {p.accent_soft_rgba};
-    border-left: 2px solid {p.accent};
+    border-left: 3px solid {p.accent};
     color: {p.text_primary};
 }}
 QListWidget::item:hover:!selected, QListView::item:hover:!selected {{
@@ -283,18 +295,22 @@ QSlider::handle:horizontal {{
 QSlider::handle:horizontal:hover {{ background: {p.accent_hover}; }}
 QSlider::sub-page:horizontal {{ background: {p.accent}; border-radius: 3px; }}
 
-/* -- Checkbox --------------------------------------------------------------- */
-QCheckBox {{ spacing: {s.xs}px; color: {p.text_primary}; }}
+/* -- Checkbox ---------------------------------------------------------------
+   Toggle-switch look: 32x18 pill that fills with accent when checked.
+   image: none suppresses Qt's default tick so the indicator reads as a
+   pure toggle background. No sliding thumb -- that would require a
+   custom QAbstractButton. */
+QCheckBox {{ spacing: {s.sm}px; color: {p.text_primary}; }}
 QCheckBox::indicator {{
-    width: 16px; height: 16px;
-    border: 1px solid {p.border_strong};
-    border-radius: {r.sm}px;
+    width: 32px; height: 18px;
+    border-radius: 9px;
     background: {p.bg_elevated};
+    border: 1px solid {p.border_strong};
 }}
 QCheckBox::indicator:hover {{ border-color: {p.accent}; }}
 QCheckBox::indicator:checked {{
     background: {p.accent};
-    border-color: {p.accent};
+    border: 1px solid {p.accent};
     image: none;
 }}
 QCheckBox::indicator:disabled {{
@@ -359,7 +375,7 @@ QToolTip {{
     padding: {s.xs}px {s.sm}px;
 }}
 
-/* -- Group box (kept around for any holdouts; cards preferred going forward) - */
+/* -- Group box (legacy; cards are preferred) ------------------------------- */
 QGroupBox {{
     background-color: {p.bg_card};
     border: 1px solid {p.border_subtle};
@@ -384,14 +400,16 @@ QScrollArea > QWidget > QWidget {{
     background: transparent;
 }}
 
+/* -- Scrollbars -------------------------------------------------------------
+   Sleek macOS / Discord style: 8 px track, rounded handle, no groove fill. */
 QScrollBar:vertical {{
     background: transparent;
-    width: 10px;
+    width: 8px;
     margin: 0;
 }}
 QScrollBar::handle:vertical {{
     background: {p.border_strong};
-    border-radius: 5px;
+    border-radius: 4px;
     min-height: 24px;
 }}
 QScrollBar::handle:vertical:hover {{ background: {p.text_muted}; }}
@@ -399,12 +417,12 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
 
 QScrollBar:horizontal {{
     background: transparent;
-    height: 10px;
+    height: 8px;
     margin: 0;
 }}
 QScrollBar::handle:horizontal {{
     background: {p.border_strong};
-    border-radius: 5px;
+    border-radius: 4px;
     min-width: 24px;
 }}
 QScrollBar::handle:horizontal:hover {{ background: {p.text_muted}; }}
