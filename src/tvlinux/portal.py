@@ -123,15 +123,15 @@ async def _safe_introspect(bus: MessageBus, name: str, path: str) -> Node:
 # portal spec and never changes, so hardcoding is safe and spec-compliant.
 #   https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html
 _REQUEST_NODE_XML = (
-    '<node>'
+    "<node>"
     '<interface name="org.freedesktop.portal.Request">'
     '<method name="Close"/>'
     '<signal name="Response">'
     '<arg type="u" name="response"/>'
     '<arg type="a{sv}" name="results"/>'
-    '</signal>'
-    '</interface>'
-    '</node>'
+    "</signal>"
+    "</interface>"
+    "</node>"
 )
 
 
@@ -151,9 +151,7 @@ class ScreenCastPortal:
     async def connect(self) -> None:
         # negotiate_unix_fd is REQUIRED: OpenPipeWireRemote returns a unix_fd,
         # and without this flag dbus-next refuses the fd and the connection EOFs.
-        self._bus = await MessageBus(
-            bus_type=BusType.SESSION, negotiate_unix_fd=True
-        ).connect()
+        self._bus = await MessageBus(bus_type=BusType.SESSION, negotiate_unix_fd=True).connect()
         introspection = await _safe_introspect(self._bus, BUS, PATH)
         proxy = self._bus.get_proxy_object(BUS, PATH, introspection)
         self._iface = proxy.get_interface(SCREENCAST_IFACE)
@@ -219,7 +217,7 @@ class ScreenCastPortal:
 
         try:
             return await asyncio.wait_for(future, timeout=120.0)
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             raise PortalError(f"{method_name} timed out after 120s") from e
 
     async def _get_version(self) -> int:
@@ -287,13 +285,13 @@ class ScreenCastPortal:
                     size=(
                         tuple(props["size"].value) if "size" in props else None  # type: ignore[arg-type]
                     ),
-                    source_type=(int(props["source_type"].value) if "source_type" in props else None),
+                    source_type=(
+                        int(props["source_type"].value) if "source_type" in props else None
+                    ),
                     position=(
                         tuple(props["position"].value) if "position" in props else None  # type: ignore[arg-type]
                     ),
-                    mapping_id=(
-                        str(props["mapping_id"].value) if "mapping_id" in props else None
-                    ),
+                    mapping_id=(str(props["mapping_id"].value) if "mapping_id" in props else None),
                 )
             )
         if not streams:
