@@ -103,6 +103,9 @@ class Application(QObject):
         self._control.toggle_glow_requested.connect(self._set_glow)
         self._control.toggle_grid_requested.connect(self._set_grid)
         self._control.opacity_requested.connect(self._set_opacity)
+        self._control.border_color_requested.connect(self._set_border_color)
+        self._control.corner_radius_requested.connect(self._set_corner_radius)
+        self._control.toggle_track_cooldown_requested.connect(self._set_track_cooldown)
         self._control.show_all_requested.connect(self._regions.set_all_visible)
         self._control.lock_all_requested.connect(self._regions.set_all_locked)
         self._control.save_profile_requested.connect(self._save_profile)
@@ -259,6 +262,27 @@ class Application(QObject):
         if r is None:
             return
         r.opacity = value
+        self._regions.update(r)
+
+    def _set_border_color(self, region_id: UUID, hex_color: str) -> None:
+        r = self._regions.get(region_id)
+        if r is None:
+            return
+        r.border_color = hex_color
+        self._regions.update(r)
+
+    def _set_corner_radius(self, region_id: UUID, radius: int) -> None:
+        r = self._regions.get(region_id)
+        if r is None:
+            return
+        r.corner_radius = int(radius)
+        self._regions.update(r)
+
+    def _set_track_cooldown(self, region_id: UUID, on: bool) -> None:
+        r = self._regions.get(region_id)
+        if r is None:
+            return
+        r.track_cooldown = bool(on)
         self._regions.update(r)
 
     # -- Mirror lifecycle -------------------------------------------------------------

@@ -31,6 +31,7 @@ from PySide6.QtGui import (
     QMouseEvent,
     QMoveEvent,
     QPainter,
+    QPainterPath,
     QPaintEvent,
     QPen,
     QResizeEvent,
@@ -62,7 +63,6 @@ class MirrorWindow(QWidget):
         self._source_image: QImage | None = None
         self._hover_edge: int = 0
         self._glow_phase: float = 0.0
-        self._glow_color = QColor(0, 200, 255)
 
         flags = (
             Qt.WindowType.FramelessWindowHint
@@ -80,8 +80,6 @@ class MirrorWindow(QWidget):
             self.resize(max(region.rect.width(), 200), max(region.rect.height(), 200))
         else:
             self.setGeometry(region.geometry)
-
-        self.setWindowOpacity(max(0.2, min(1.0, region.opacity)))
 
         self._glow_anim = QPropertyAnimation(self, b"glow_phase_prop", self)
         self._glow_anim.setStartValue(0.0)
@@ -102,7 +100,6 @@ class MirrorWindow(QWidget):
         prev = self._region
         self._region = region
         self.setWindowTitle(region.name)
-        self.setWindowOpacity(max(0.2, min(1.0, region.opacity)))
         if region.always_on_top != prev.always_on_top:
             flags = self.windowFlags()
             if region.always_on_top:
@@ -136,7 +133,19 @@ class MirrorWindow(QWidget):
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         target = self.rect().adjusted(1, 1, -1, -1)
+
+        # Build a single rounded path reused for clipping the frame and stroking
+        # the border. Radius is clamped so it never exceeds half the shortest
+        # side (which would render as a weird lemon shape).
+        radius = max(0, min(self._region.corner_radius, min(self.width(), self.height()) // 2))
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(self.rect(), radius, radius)
+
+        painter.save()
+        painter.setClipPath(clip_path)
+        painter.setOpacity(max(0.2, min(1.0, self._region.opacity)))
 
         if self._source_image is not None:
             src = self._region.rect.intersected(self._source_image.rect())
@@ -149,25 +158,34 @@ class MirrorWindow(QWidget):
 
         if self._region.grid:
             self._draw_grid(painter, target)
+        painter.restore()
 
-        self._draw_border(painter)
+        self._draw_border(painter, clip_path)
 
         if not self._region.locked:
             self._draw_resize_hint(painter)
 
-    def _draw_border(self, painter: QPainter) -> None:
+    def _resolve_border_color(self) -> QColor:
+        c = QColor(self._region.border_color)
+        if not c.isValid():
+            c = QColor("#0f8fbf")
+        return c
+
+    def _draw_border(self, painter: QPainter, path: QPainterPath) -> None:
+        base = self._resolve_border_color()
         if self._region.border_glow:
-            # Pulse between two colors using glow_phase.
+            # Pulse alpha using glow_phase (set by the running QPropertyAnimation).
             import math
 
             t = 0.5 - 0.5 * math.cos(self._glow_phase * 2 * math.pi)
-            base = self._glow_color
-            c = QColor(base.red(), base.green(), base.blue(), int(90 + 120 * t))
-            pen = QPen(c, 2)
+            color = QColor(base.red(), base.green(), base.blue(), int(120 + 135 * t))
+            pen = QPen(color, 2)
         else:
-            pen = QPen(QColor(60, 60, 60, 200), 1)
+            pen = QPen(base, 1.5)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
-        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
 
     def _draw_grid(self, painter: QPainter, target: QRect) -> None:
         pen = QPen(QColor(255, 255, 255, 40), 1)
@@ -306,7 +324,8 @@ class MirrorWindow(QWidget):
     def _persist_geometry(self) -> None:
         """Save the live window geometry back onto the region model."""
         new_geo = QRect(self.geometry())
-        if self._region.geometry != new_geo:
+        current = self._region.geometry
+        if current is None or current != new_geo:
             self._region.geometry = new_geo
             self.region_updated.emit(self._region)
 

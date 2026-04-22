@@ -39,6 +39,9 @@ class Region:
     grid_spacing: int = 16
     always_on_top: bool = True
     geometry: QRect | None = None
+    border_color: str = "#0f8fbf"
+    corner_radius: int = 12
+    track_cooldown: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -61,6 +64,9 @@ class Region:
             grid_spacing=int(data.get("grid_spacing", 16)),
             always_on_top=bool(data.get("always_on_top", True)),
             geometry=_list_to_rect(data.get("geometry")),
+            border_color=str(data.get("border_color", "#0f8fbf")),
+            corner_radius=int(data.get("corner_radius", 12)),
+            track_cooldown=bool(data.get("track_cooldown", False)),
         )
 
 

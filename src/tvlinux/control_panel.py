@@ -18,9 +18,10 @@ from __future__ import annotations
 from uuid import UUID
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QIcon
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
+    QColorDialog,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSlider,
+    QSpinBox,
     QStatusBar,
     QToolBar,
     QVBoxLayout,
@@ -53,6 +55,9 @@ class ControlPanel(QMainWindow):
     toggle_glow_requested = Signal(UUID, bool)
     toggle_grid_requested = Signal(UUID, bool)
     opacity_requested = Signal(UUID, float)
+    border_color_requested = Signal(UUID, str)
+    corner_radius_requested = Signal(UUID, int)
+    toggle_track_cooldown_requested = Signal(UUID, bool)
     show_all_requested = Signal(bool)
     lock_all_requested = Signal(bool)
 
@@ -155,6 +160,26 @@ class ControlPanel(QMainWindow):
         opacity_row.addWidget(self._opacity_value)
         layout.addLayout(opacity_row)
 
+        style_row = QHBoxLayout()
+        style_row.addWidget(QLabel("Border"))
+        self._btn_border_color = QPushButton()
+        self._btn_border_color.setFixedWidth(36)
+        self._btn_border_color.setToolTip("Pick border color")
+        self._btn_border_color.clicked.connect(self._on_border_color_clicked)
+        self._current_border_color = "#0f8fbf"
+        self._apply_border_color_swatch(self._current_border_color)
+        style_row.addWidget(self._btn_border_color)
+        style_row.addSpacing(8)
+        style_row.addWidget(QLabel("Corner radius"))
+        self._spin_radius = QSpinBox()
+        self._spin_radius.setRange(0, 32)
+        self._spin_radius.setSuffix(" px")
+        self._spin_radius.setValue(12)
+        self._spin_radius.valueChanged.connect(self._on_corner_radius_changed)
+        style_row.addWidget(self._spin_radius)
+        style_row.addStretch(1)
+        layout.addLayout(style_row)
+
         row2 = QHBoxLayout()
         self._chk_glow = QCheckBox("Border glow")
         self._chk_grid = QCheckBox("Grid overlay")
@@ -165,12 +190,36 @@ class ControlPanel(QMainWindow):
         row2.addStretch(1)
         layout.addLayout(row2)
 
+        row3 = QHBoxLayout()
+        self._chk_track_cooldown = QCheckBox("Track cooldown proc")
+        self._chk_track_cooldown.setToolTip(
+            "Use OCR to watch for cooldown drops (e.g. helmet procs) and flash the border"
+        )
+        row3.addWidget(self._chk_track_cooldown)
+        row3.addStretch(1)
+        layout.addLayout(row3)
+
         self._chk_glow.toggled.connect(self._on_glow_toggled)
         self._chk_grid.toggled.connect(self._on_grid_toggled)
         self._chk_lock.toggled.connect(self._on_lock_toggled)
+        self._chk_track_cooldown.toggled.connect(self._on_track_cooldown_toggled)
 
         group.setEnabled(False)
         return group
+
+    def _apply_border_color_swatch(self, hex_color: str) -> None:
+        """Paint the color-picker button itself with the current hex color."""
+        c = QColor(hex_color)
+        if not c.isValid():
+            c = QColor("#0f8fbf")
+            hex_color = "#0f8fbf"
+        self._current_border_color = hex_color
+        text_color = "#000" if c.lightness() > 160 else "#fff"
+        self._btn_border_color.setStyleSheet(
+            f"QPushButton {{ background: {hex_color}; color: {text_color};"
+            " border: 1px solid #444; border-radius: 4px; }}"
+        )
+        self._btn_border_color.setText(hex_color.upper())
 
     def _build_profiles_group(self) -> QGroupBox:
         group = QGroupBox("Profiles")
@@ -269,16 +318,23 @@ class ControlPanel(QMainWindow):
         self._chk_glow.blockSignals(True)
         self._chk_grid.blockSignals(True)
         self._chk_lock.blockSignals(True)
+        self._spin_radius.blockSignals(True)
+        self._chk_track_cooldown.blockSignals(True)
         val = round(region.opacity * 100)
         self._opacity_slider.setValue(max(20, min(100, val)))
         self._opacity_value.setText(f"{self._opacity_slider.value()}%")
         self._chk_glow.setChecked(region.border_glow)
         self._chk_grid.setChecked(region.grid)
         self._chk_lock.setChecked(region.locked)
+        self._spin_radius.setValue(max(0, min(32, region.corner_radius)))
+        self._chk_track_cooldown.setChecked(region.track_cooldown)
+        self._apply_border_color_swatch(region.border_color)
         self._opacity_slider.blockSignals(False)
         self._chk_glow.blockSignals(False)
         self._chk_grid.blockSignals(False)
         self._chk_lock.blockSignals(False)
+        self._spin_radius.blockSignals(False)
+        self._chk_track_cooldown.blockSignals(False)
 
     def _current_region_id(self) -> UUID | None:
         item = self._list.currentItem()
@@ -327,6 +383,30 @@ class ControlPanel(QMainWindow):
         rid = self._current_region_id()
         if rid is not None:
             self.toggle_lock_requested.emit(rid, on)
+
+    def _on_border_color_clicked(self) -> None:
+        rid = self._current_region_id()
+        if rid is None:
+            return
+        initial = QColor(self._current_border_color)
+        if not initial.isValid():
+            initial = QColor("#0f8fbf")
+        chosen = QColorDialog.getColor(initial, self, "Pick border color")
+        if not chosen.isValid():
+            return
+        hex_color = chosen.name()
+        self._apply_border_color_swatch(hex_color)
+        self.border_color_requested.emit(rid, hex_color)
+
+    def _on_corner_radius_changed(self, value: int) -> None:
+        rid = self._current_region_id()
+        if rid is not None:
+            self.corner_radius_requested.emit(rid, int(value))
+
+    def _on_track_cooldown_toggled(self, on: bool) -> None:
+        rid = self._current_region_id()
+        if rid is not None:
+            self.toggle_track_cooldown_requested.emit(rid, on)
 
     # -- Context + actions ------------------------------------------------------------
 

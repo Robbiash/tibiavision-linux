@@ -45,6 +45,9 @@ def test_roundtrip_serialization(qapp):
         border_glow=True,
         grid=True,
         grid_spacing=8,
+        border_color="#ff3355",
+        corner_radius=20,
+        track_cooldown=True,
     )
     mgr.add(r)
 
@@ -61,6 +64,41 @@ def test_roundtrip_serialization(qapp):
     assert r2.border_glow is True
     assert r2.grid is True
     assert r2.grid_spacing == 8
+    assert r2.border_color == "#ff3355"
+    assert r2.corner_radius == 20
+    assert r2.track_cooldown is True
+
+
+def test_region_defaults(qapp):
+    r = Region()
+    assert r.border_color == "#0f8fbf"
+    assert r.corner_radius == 12
+    assert r.track_cooldown is False
+
+
+def test_roundtrip_backwards_compatible_missing_fields(qapp):
+    """Old profile JSON without the Phase 1 fields must still load with defaults."""
+    legacy = [
+        {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "Legacy",
+            "rect": [0, 0, 100, 100],
+            "visible": True,
+            "locked": False,
+            "opacity": 1.0,
+            "border_glow": False,
+            "grid": False,
+            "grid_spacing": 16,
+            "always_on_top": True,
+            "geometry": None,
+        }
+    ]
+    mgr = RegionManager()
+    mgr.load_list(legacy)
+    r = mgr.all()[0]
+    assert r.border_color == "#0f8fbf"
+    assert r.corner_radius == 12
+    assert r.track_cooldown is False
 
 
 def test_set_all_visible_emits_changed_only_on_diff(qapp):
