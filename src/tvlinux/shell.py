@@ -27,7 +27,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QCloseEvent
+from PySide6.QtGui import QAction, QCloseEvent, QResizeEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -121,7 +121,7 @@ class NavRail(QWidget):
             f"color: {TOKENS.palette.text_primary};"
         )
         brand_col.addWidget(brand)
-        edition = muted_label("Linux edition", brand_wrap)
+        edition = muted_label("Linux edition", brand_wrap, wrap=False)
         edition.setStyleSheet(
             f"font-size: {t.size_caption}pt;"
             "letter-spacing: 1px;"
@@ -191,6 +191,25 @@ class NavRail(QWidget):
         if btn is not None:
             btn.setChecked(True)
 
+    def set_compact(self, compact: bool) -> None:
+        """Slim the rail down at narrow window widths.
+
+        Trims the fixed width by ~10% and drops outer padding so the
+        content column gains back ~24px. Kept conservative so the rail
+        still reads as a sidebar, not a toolbar.
+        """
+        s = TOKENS.spacing
+        if compact:
+            self.setFixedWidth(196)
+            layout = self.layout()
+            if layout is not None:
+                layout.setContentsMargins(s.sm, s.md, s.sm, s.sm)
+        else:
+            self.setFixedWidth(220)
+            layout = self.layout()
+            if layout is not None:
+                layout.setContentsMargins(s.md, s.lg, s.md, s.md)
+
 
 # -- Page header -------------------------------------------------------------
 
@@ -253,6 +272,17 @@ class PageHeader(QWidget):
         widget.setParent(self._actions_host)
         widget.hide()
         self._registered.add(widget)
+
+    def set_compact(self, compact: bool) -> None:
+        """Pull in the outer header margins for narrow widths."""
+        s = TOKENS.spacing
+        layout = self.layout()
+        if layout is None:
+            return
+        if compact:
+            layout.setContentsMargins(s.lg, s.md, s.lg, s.sm)
+        else:
+            layout.setContentsMargins(s.xl, s.lg, s.xl, s.md)
 
     def set_actions(self, widgets: list[QWidget]) -> None:
         # Remove all items from the layout without touching their parents.
@@ -614,6 +644,21 @@ class ShellWindow(QMainWindow):
 
     def set_profiles(self, names: list[str], current: str | None) -> None:
         self.footer.set_profiles(names, current)
+
+    # Below this window width the shell switches into a more compact
+    # layout (slimmer nav rail, tighter header margins). Chosen so that
+    # the default min-size (880px) just barely fits -- users dragging the
+    # window smaller than the default get the benefit automatically, and
+    # the transition is invisible near fullscreen.
+    _COMPACT_BREAKPOINT = 980
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        compact = event.size().width() < self._COMPACT_BREAKPOINT
+        if getattr(self, "_is_compact", None) != compact:
+            self._is_compact = compact
+            self.nav.set_compact(compact)
+            self.header.set_compact(compact)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # Hide to tray instead of actually quitting; the app lifecycle is

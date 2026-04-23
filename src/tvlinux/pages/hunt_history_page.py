@@ -108,7 +108,7 @@ class HuntHistoryPage(QWidget):
         self._detail_label.setTextFormat(Qt.TextFormat.RichText)
         dcl.addWidget(self._detail_label)
 
-        dcl.addWidget(muted_label("Notes", detail_card))
+        dcl.addWidget(muted_label("Notes", detail_card, wrap=False))
         self._notes = QPlainTextEdit(detail_card)
         self._notes.setPlaceholderText("Add notes about this hunt (loot rolls, tactics, etc.)")
         self._notes.textChanged.connect(self._on_notes_changed)

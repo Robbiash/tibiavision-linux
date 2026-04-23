@@ -33,21 +33,27 @@ class _Card(QFrame):
     body_layout: QVBoxLayout
 
 
-def card(parent: QWidget | None = None) -> _Card:
+def card(parent: QWidget | None = None, *, compact: bool = False) -> _Card:
     """Return a rounded surface container used for grouping controls.
 
     The returned frame has ``objectName == "Card"`` so the global QSS
     (``QFrame#Card``) applies its background / border / radius automatically.
     Callers attach children via ``frame.body_layout.addWidget(...)``.
+
+    Set ``compact=True`` for dense form-heavy pages (like Settings) where
+    the standard ``lg`` padding wastes horizontal room -- uses ``md``
+    margins instead, which visibly reclaims ~16px of usable width on
+    each side without making fullscreen look empty.
     """
     frame = _Card(parent)
     frame.setObjectName("Card")
     frame.setFrameShape(QFrame.Shape.NoFrame)
     layout = QVBoxLayout(frame)
     s = TOKENS.spacing
-    # Generous padding: the Jurojin look leans on breathing room inside
-    # cards rather than on drop-shadows for depth.
-    layout.setContentsMargins(s.lg, s.lg, s.lg, s.lg)
+    # Generous padding by default (the Jurojin look leans on breathing
+    # room inside cards). Compact cards trade a bit of that for width.
+    pad = s.md if compact else s.lg
+    layout.setContentsMargins(pad, pad, pad, pad)
     layout.setSpacing(s.sm)
     frame.body_layout = layout
     return frame
@@ -69,9 +75,24 @@ def section_label(text: str, parent: QWidget | None = None) -> QLabel:
     return label
 
 
-def muted_label(text: str, parent: QWidget | None = None) -> QLabel:
+def muted_label(
+    text: str,
+    parent: QWidget | None = None,
+    *,
+    wrap: bool = True,
+) -> QLabel:
+    """Return a muted caption label that wraps long text by default.
+
+    ``QLabel`` defaults to ``wordWrap == False``, which inflates the
+    layout's minimum width whenever a muted helper line runs long --
+    the exact cause of the Settings page looking squeezed at narrow
+    widths. Default to wrapping on; short chips can opt out via
+    ``wrap=False``.
+    """
     label = QLabel(text, parent)
     label.setProperty("role", "muted")
+    if wrap:
+        label.setWordWrap(True)
     return label
 
 

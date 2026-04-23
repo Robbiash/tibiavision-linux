@@ -14,14 +14,17 @@ Lets the user:
 
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QCheckBox,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -31,7 +34,11 @@ from ..hunt_mode import CopyAnchor, HuntModeManager
 from ..hunt_refresh import HuntRefresher
 from ..key_listener import BackendStatus, PassiveKeyListener
 from ..theme import TOKENS
-from ..ui_helpers import card, hline, muted_label, pill_button, section_label
+from ..ui_helpers import card, muted_label, pill_button, section_label
+
+# Typical "comfortable form" width -- wider than this and the fields start
+# feeling stranded in fullscreen, narrower than this and they squeeze.
+_CONTENT_MAX_WIDTH = 860
 
 
 class SettingsPage(QWidget):
@@ -55,12 +62,43 @@ class SettingsPage(QWidget):
 
     def _build_ui(self) -> None:
         s = TOKENS.spacing
-        outer = QVBoxLayout(self)
+
+        # Wrap the whole page in a vertical scroll area so dense content
+        # never clips vertically at short window heights -- the scroll
+        # stays invisible when everything fits.
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        page_layout.addWidget(scroll)
+
+        # Constrain the form to a comfortable reading width. Without this
+        # the cards stretch edge-to-edge on ultrawide monitors and the
+        # form fields feel stranded; with it, Settings reads like a
+        # focused configuration sheet at any window size.
+        content = QWidget(scroll)
+        content_row = QHBoxLayout(content)
+        content_row.setContentsMargins(s.lg, s.md, s.lg, s.lg)
+        content_row.setSpacing(0)
+        content_row.addStretch(1)
+
+        inner = QWidget(content)
+        inner.setMaximumWidth(_CONTENT_MAX_WIDTH)
+        inner.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        outer = QVBoxLayout(inner)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(s.md)
+        content_row.addWidget(inner, 10)
+        content_row.addStretch(1)
+
+        scroll.setWidget(content)
 
         # --- Hunt Mode master ------------------------------------------
-        master = card(self)
+        master = card(inner, compact=True)
         ml = master.body_layout
         ml.addWidget(section_label("HUNT MODE", master))
         self._chk_active = QCheckBox("Hunt Mode is active", master)
@@ -77,21 +115,26 @@ class SettingsPage(QWidget):
         outer.addWidget(master)
 
         # --- Trigger key -----------------------------------------------
-        trigger = card(self)
+        trigger = card(inner, compact=True)
         tl = trigger.body_layout
         tl.addWidget(section_label("TRIGGER KEY", trigger))
 
+        # Header row: the most important control -- key picker + enabled
+        # toggle -- gets its own horizontal row with real stretch on the
+        # QLineEdit so it grows/shrinks gracefully.
         key_row = QHBoxLayout()
+        key_row.setSpacing(s.sm)
         key_row.addWidget(QLabel("Listen for key:", trigger))
         self._edit_key = QLineEdit(trigger)
         self._edit_key.setMaxLength(16)
         self._edit_key.setPlaceholderText("space")
+        self._edit_key.setMinimumWidth(120)
+        self._edit_key.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._edit_key.editingFinished.connect(self._commit_trigger_key)
-        key_row.addWidget(self._edit_key)
+        key_row.addWidget(self._edit_key, 1)
         self._chk_key_enabled = QCheckBox("Enabled", trigger)
         self._chk_key_enabled.toggled.connect(self._commit_trigger_enabled)
         key_row.addWidget(self._chk_key_enabled)
-        key_row.addStretch(1)
         tl.addLayout(key_row)
 
         tl.addWidget(
@@ -102,40 +145,45 @@ class SettingsPage(QWidget):
                 trigger,
             )
         )
-        tl.addWidget(hline(trigger))
 
-        rate_row = QHBoxLayout()
-        rate_row.addWidget(QLabel("Min seconds between refreshes:", trigger))
+        # Secondary controls live in a QFormLayout so long labels wrap
+        # above the field on narrow widths and sit beside it on wider
+        # ones. Qt does that split automatically via WrapLongRows.
+        form = QFormLayout()
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        form.setHorizontalSpacing(s.md)
+        form.setVerticalSpacing(s.sm)
+        form.setContentsMargins(0, s.sm, 0, 0)
+
         self._spin_rate = QSpinBox(trigger)
         self._spin_rate.setRange(1, 3600)
         self._spin_rate.setSuffix(" s")
+        self._spin_rate.setMinimumWidth(110)
         self._spin_rate.valueChanged.connect(self._commit_min_interval)
-        rate_row.addWidget(self._spin_rate)
-        rate_row.addStretch(1)
-        tl.addLayout(rate_row)
+        form.addRow("Min seconds between refreshes:", self._spin_rate)
 
-        auto_row = QHBoxLayout()
-        auto_row.addWidget(QLabel("Auto-fire every (fallback, 0 = off):", trigger))
         self._spin_auto = QSpinBox(trigger)
         self._spin_auto.setRange(0, 3600)
         self._spin_auto.setSuffix(" s")
+        self._spin_auto.setMinimumWidth(110)
         self._spin_auto.valueChanged.connect(self._commit_auto_interval)
-        auto_row.addWidget(self._spin_auto)
-        auto_row.addStretch(1)
-        tl.addLayout(auto_row)
+        form.addRow("Auto-fire every (fallback, 0 = off):", self._spin_auto)
 
-        focus_row = QHBoxLayout()
-        focus_row.addWidget(QLabel("Only fire when window title contains:", trigger))
         self._edit_title = QLineEdit(trigger)
         self._edit_title.setPlaceholderText("Tibia")
+        self._edit_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._edit_title.editingFinished.connect(self._commit_title_substring)
-        focus_row.addWidget(self._edit_title, 1)
-        tl.addLayout(focus_row)
+        form.addRow("Only fire when window title contains:", self._edit_title)
+
+        tl.addLayout(form)
 
         outer.addWidget(trigger)
 
         # --- Calibration ----------------------------------------------
-        calib = card(self)
+        calib = card(inner, compact=True)
         cl = calib.body_layout
         cl.addWidget(section_label("CALIBRATE COPY BUTTONS", calib))
         cl.addWidget(
@@ -146,26 +194,44 @@ class SettingsPage(QWidget):
             )
         )
 
+        # Each anchor gets a vertical block: title + wrapping status +
+        # right-aligned button cluster. Vertical stacks reflow well at
+        # every width and keep the Calibrate/Clear buttons next to the
+        # status they act on.
         for kind, title in (("hunt", "Hunt Analyser"), ("party", "Party Hunt")):
-            row = QHBoxLayout()
-            lbl = QLabel(f"{title}:", calib)
-            row.addWidget(lbl)
-            val = QLabel("(not calibrated)", calib)
+            block = QWidget(calib)
+            block.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+            bl = QVBoxLayout(block)
+            bl.setContentsMargins(0, s.xs, 0, s.xs)
+            bl.setSpacing(s.xs)
+
+            header_row = QHBoxLayout()
+            header_row.setSpacing(s.sm)
+            name = QLabel(title, block)
+            name.setStyleSheet(f"font-weight: {TOKENS.type.weight_bold};")
+            header_row.addWidget(name)
+            header_row.addStretch(1)
+            btn = pill_button("Calibrate", parent=block)
+            clear = pill_button("Clear", variant="ghost", parent=block)
+            header_row.addWidget(btn)
+            header_row.addWidget(clear)
+            bl.addLayout(header_row)
+
+            val = QLabel("(not calibrated)", block)
             val.setProperty("role", "muted")
-            row.addWidget(val, 1)
-            btn = pill_button("Calibrate", parent=calib)
+            val.setWordWrap(True)
+            bl.addWidget(val)
+
             btn.clicked.connect(lambda _=False, k=kind, v=val: self._run_calibration(k, v))
-            row.addWidget(btn)
-            clear = pill_button("Clear", variant="ghost", parent=calib)
             clear.clicked.connect(lambda _=False, k=kind, v=val: self._clear_anchor(k, v))
-            row.addWidget(clear)
-            cl.addLayout(row)
+
+            cl.addWidget(block)
             setattr(self, f"_{kind}_anchor_label", val)
 
         outer.addWidget(calib)
 
         # --- Diagnostics ----------------------------------------------
-        diag = card(self)
+        diag = card(inner, compact=True)
         dl = diag.body_layout
         dl.addWidget(section_label("DIAGNOSTICS", diag))
         self._lbl_listener = QLabel("", diag)
