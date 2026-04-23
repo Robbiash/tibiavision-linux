@@ -103,6 +103,15 @@ class RegionsPage(QWidget):
         delete_shortcut.activated.connect(self._on_delete_current)
         regions_card.body_layout.addWidget(self._list)
 
+        # Empty-state hint shown only when the region list is empty.
+        self._empty_hint = QLabel(
+            "No regions yet — click  Add region  to create your first.",
+            regions_card,
+        )
+        self._empty_hint.setProperty("role", "empty-state")
+        self._empty_hint.setWordWrap(True)
+        regions_card.body_layout.addWidget(self._empty_hint)
+
         self._detail = self._build_detail_scroll()
 
         layout.addWidget(regions_card, 1)
@@ -289,6 +298,10 @@ class RegionsPage(QWidget):
     def _refresh_region_count(self) -> None:
         count = self._list.count()
         self._regions_count.setText(f"{count} region{'s' if count != 1 else ''}")
+        # Flip the list <-> empty-state hint based on whether anything is
+        # there; the hint only makes sense when the list is empty.
+        self._list.setVisible(count > 0)
+        self._empty_hint.setVisible(count == 0)
 
     # -- Detail editors -------------------------------------------------------
 

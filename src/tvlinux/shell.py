@@ -77,34 +77,66 @@ PAGES: list[tuple[str, str, str]] = [
 
 
 class NavRail(QWidget):
-    """Vertical list of page buttons.
+    """Vertical list of page buttons with brand + persistent footer actions.
 
     Implemented on top of a ``QButtonGroup`` of ``QToolButton``s rather than
-    a ``QListWidget`` so each entry can show an icon + label + shortcut
-    indicator and still honour the design-system's QSS for toggled state.
+    a ``QListWidget`` so each entry can show an icon + label and style its
+    :checked state directly through the design-system QSS.
+
+    The rail carries three zones:
+
+    1. **Brand** (top): product name + edition caption.
+    2. **Navigation** (middle): one button per page.
+    3. **Footer** (bottom): cross-cutting actions that should always be
+       reachable (currently just "Donate"; more can be added without
+       touching page-level header actions).
     """
 
     navigated = Signal(str)  # page key
+    donate_clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("NavRail")
-        self.setFixedWidth(184)
+        self.setFixedWidth(220)
+
+        s = TOKENS.spacing
+        t = TOKENS.type
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(
-            TOKENS.spacing.md, TOKENS.spacing.lg, TOKENS.spacing.md, TOKENS.spacing.md
-        )
-        outer.setSpacing(TOKENS.spacing.xs)
+        outer.setContentsMargins(s.md, s.lg, s.md, s.md)
+        outer.setSpacing(s.xs)
 
-        brand = QLabel("TibiaVision", self)
+        # -- Brand block ---------------------------------------------------
+        brand_wrap = QWidget(self)
+        brand_wrap.setObjectName("NavBrand")
+        brand_col = QVBoxLayout(brand_wrap)
+        brand_col.setContentsMargins(s.sm, s.xs, s.sm, s.sm)
+        brand_col.setSpacing(2)
+
+        brand = QLabel("TibiaVision", brand_wrap)
         brand.setStyleSheet(
-            f"font-size: {TOKENS.type.size_heading}pt; " f"font-weight: {TOKENS.type.weight_bold};"
+            f"font-size: {t.size_display - 2}pt;"
+            f"font-weight: {t.weight_bold};"
+            f"color: {TOKENS.palette.text_primary};"
         )
-        outer.addWidget(brand)
-        outer.addWidget(muted_label("Linux edition", self))
-        outer.addSpacing(TOKENS.spacing.md)
+        brand_col.addWidget(brand)
+        edition = muted_label("Linux edition", brand_wrap)
+        edition.setStyleSheet(
+            f"font-size: {t.size_caption}pt;"
+            "letter-spacing: 1px;"
+            "text-transform: uppercase;"
+            f"color: {TOKENS.palette.text_muted};"
+        )
+        brand_col.addWidget(edition)
+        outer.addWidget(brand_wrap)
 
+        # Subtle divider between brand and nav items.
+        outer.addSpacing(s.sm)
+        outer.addWidget(hline(self))
+        outer.addSpacing(s.sm)
+
+        # -- Nav buttons ---------------------------------------------------
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons: dict[str, QToolButton] = {}
@@ -118,18 +150,18 @@ class NavRail(QWidget):
         }
         for key, label, _subtitle in PAGES:
             btn = QToolButton(self)
-            btn.setText(f"  {label}")
+            btn.setText(label)
             btn.setCheckable(True)
             btn.setAutoRaise(False)
             btn.setIcon(icon(icon_for.get(key, "circle")))
             btn.setIconSize(default_icon_size())
             btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             btn.setProperty("role", "nav")
+            btn.setMinimumHeight(38)
             btn.setSizePolicy(
                 btn.sizePolicy().horizontalPolicy(),
                 btn.sizePolicy().verticalPolicy(),
             )
-            btn.setMinimumHeight(34)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _=False, k=key: self.navigated.emit(k))
             self._group.addButton(btn)
@@ -137,6 +169,22 @@ class NavRail(QWidget):
             outer.addWidget(btn)
 
         outer.addStretch(1)
+
+        # -- Persistent footer actions ------------------------------------
+        outer.addWidget(hline(self))
+        outer.addSpacing(s.xs)
+
+        self._donate_btn = QToolButton(self)
+        self._donate_btn.setText("Donate")
+        self._donate_btn.setIcon(icon("heart"))
+        self._donate_btn.setIconSize(default_icon_size())
+        self._donate_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._donate_btn.setProperty("role", "nav-footer")
+        self._donate_btn.setMinimumHeight(34)
+        self._donate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._donate_btn.setToolTip("Support development")
+        self._donate_btn.clicked.connect(self.donate_clicked)
+        outer.addWidget(self._donate_btn)
 
     def set_current(self, key: str) -> None:
         btn = self._buttons.get(key)
@@ -148,22 +196,27 @@ class NavRail(QWidget):
 
 
 class PageHeader(QWidget):
-    """Title + subtitle + per-page action slot above the content."""
+    """Title + subtitle + per-page action slot above the content.
+
+    Action widgets are *reparented* to the header's action host once and then
+    shown/hidden depending on the active page -- never orphaned with
+    ``setParent(None)``, which would turn them into stray top-level windows.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("PageHeader")
+        s = TOKENS.spacing
+
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(
-            TOKENS.spacing.lg, TOKENS.spacing.md, TOKENS.spacing.lg, TOKENS.spacing.md
-        )
-        layout.setSpacing(TOKENS.spacing.md)
+        layout.setContentsMargins(s.xl, s.lg, s.xl, s.md)
+        layout.setSpacing(s.md)
 
         text_col = QVBoxLayout()
-        text_col.setSpacing(0)
+        text_col.setSpacing(2)
         self._title = QLabel("", self)
         self._title.setStyleSheet(
-            f"font-size: {TOKENS.type.size_display}pt; " f"font-weight: {TOKENS.type.weight_bold};"
+            f"font-size: {TOKENS.type.size_display}pt; font-weight: {TOKENS.type.weight_bold};"
         )
         self._subtitle = QLabel("", self)
         self._subtitle.setProperty("role", "muted")
@@ -174,23 +227,46 @@ class PageHeader(QWidget):
         self._actions_host = QWidget(self)
         self._actions_row = QHBoxLayout(self._actions_host)
         self._actions_row.setContentsMargins(0, 0, 0, 0)
-        self._actions_row.setSpacing(TOKENS.spacing.xs)
-        layout.addWidget(self._actions_host)
+        self._actions_row.setSpacing(s.xs)
+        layout.addWidget(self._actions_host, 0, Qt.AlignmentFlag.AlignRight)
+
+        # Buttons that have ever been registered as actions live here
+        # so we can hide the ones we don't currently need instead of
+        # re-parenting them to ``None`` (which would spawn top-level
+        # windows -- the "floating Donate button" bug).
+        self._registered: set[QWidget] = set()
+
+    @property
+    def actions_host(self) -> QWidget:
+        return self._actions_host
 
     def set_page(self, title: str, subtitle: str) -> None:
         self._title.setText(title)
         self._subtitle.setText(subtitle)
 
-    def set_actions(self, buttons: list[QPushButton]) -> None:
+    def register_action(self, widget: QWidget) -> None:
+        """Register ``widget`` as a header action without showing it yet.
+
+        Reparents the widget onto the actions host and hides it so it does
+        not appear as an orphan top-level window before ``set_actions``.
+        """
+        widget.setParent(self._actions_host)
+        widget.hide()
+        self._registered.add(widget)
+
+    def set_actions(self, widgets: list[QWidget]) -> None:
+        # Remove all items from the layout without touching their parents.
         while self._actions_row.count():
-            item = self._actions_row.takeAt(0)
-            if item is None:
-                continue
-            w = item.widget()
-            if w is not None:
-                w.setParent(None)
-        for b in buttons:
-            self._actions_row.addWidget(b)
+            self._actions_row.takeAt(0)
+        # Hide everything we've ever registered; we'll re-show just the
+        # ones for this page.
+        for w in self._registered:
+            w.hide()
+        for w in widgets:
+            if w not in self._registered:
+                self.register_action(w)
+            w.show()
+            self._actions_row.addWidget(w)
 
 
 # -- Status footer -----------------------------------------------------------
@@ -367,6 +443,7 @@ class ShellWindow(QMainWindow):
 
         self.nav = NavRail(self)
         self.nav.navigated.connect(self._on_nav)
+        self.nav.donate_clicked.connect(self.donate_requested)
         body.addWidget(self.nav)
 
         content = QWidget(self)
@@ -441,23 +518,36 @@ class ShellWindow(QMainWindow):
         rp.lock_all_requested.connect(self.lock_all_requested)
 
     def _build_header_actions(self) -> None:
-        # Regions page default action set.
+        # Regions page default action set. The primary action (Add region)
+        # keeps its full label; bulk actions collapse to icon-only ghost
+        # buttons with tooltips so the header never overflows on narrow
+        # windows.
         self._region_actions: dict[str, QPushButton] = {}
 
-        def make_action(
-            label: str, variant: str = "default", icon_name: str | None = None
-        ) -> QPushButton:
-            btn = pill_button(label, variant=variant, parent=self)
+        def make_pill(label: str, variant: str, icon_name: str | None) -> QPushButton:
+            btn = pill_button(label, variant=variant, parent=self.header.actions_host)
             if icon_name:
                 btn.setIcon(icon(icon_name))
                 btn.setIconSize(default_icon_size())
+            self.header.register_action(btn)
             return btn
 
-        self._region_actions["add"] = make_action("Add region", variant="primary", icon_name="plus")
-        self._region_actions["show"] = make_action("Show all", icon_name="eye")
-        self._region_actions["hide"] = make_action("Hide all", icon_name="eye-off")
-        self._region_actions["lock"] = make_action("Lock all", icon_name="lock")
-        self._region_actions["unlock"] = make_action("Unlock all", icon_name="unlock")
+        def make_icon_button(icon_name: str, tooltip: str) -> QPushButton:
+            btn = QPushButton(self.header.actions_host)
+            btn.setProperty("variant", "icon")
+            btn.setIcon(icon(icon_name))
+            btn.setIconSize(default_icon_size())
+            btn.setFixedSize(36, 36)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            self.header.register_action(btn)
+            return btn
+
+        self._region_actions["add"] = make_pill("Add region", variant="primary", icon_name="plus")
+        self._region_actions["show"] = make_icon_button("eye", "Show all regions")
+        self._region_actions["hide"] = make_icon_button("eye-off", "Hide all regions")
+        self._region_actions["lock"] = make_icon_button("lock", "Lock all regions")
+        self._region_actions["unlock"] = make_icon_button("unlock", "Unlock all regions")
 
         self._region_actions["add"].clicked.connect(self.add_region_requested.emit)
         self._region_actions["show"].clicked.connect(lambda: self.show_all_requested.emit(True))
@@ -465,14 +555,19 @@ class ShellWindow(QMainWindow):
         self._region_actions["lock"].clicked.connect(lambda: self.lock_all_requested.emit(True))
         self._region_actions["unlock"].clicked.connect(lambda: self.lock_all_requested.emit(False))
 
+        # Subtle divider between the primary action and the icon-only
+        # bulk-action cluster.
+        self._regions_sep = QFrame(self.header.actions_host)
+        self._regions_sep.setFrameShape(QFrame.Shape.VLine)
+        self._regions_sep.setProperty("role", "vline")
+        self._regions_sep.setFixedHeight(24)
+        self.header.register_action(self._regions_sep)
+
         # Hunt Mode toggle for hunt history header.
-        self._hunt_mode_button = make_action("Hunt Mode: off", variant="ghost")
+        self._hunt_mode_button = make_pill("Hunt Mode: off", variant="ghost", icon_name=None)
         self._hunt_mode_button.clicked.connect(lambda: self._mode.toggle())
         self._mode.toggled.connect(self._sync_hunt_mode_button)
         self._sync_hunt_mode_button(self._mode.active)
-
-        self._donate_button = make_action("Donate", icon_name="heart")
-        self._donate_button.clicked.connect(self.donate_requested.emit)
 
     def _sync_hunt_mode_button(self, on: bool) -> None:
         self._hunt_mode_button.setText("Hunt Mode: ON" if on else "Hunt Mode: off")
@@ -495,10 +590,11 @@ class ShellWindow(QMainWindow):
         self.nav.set_current(key)
         self.header.set_actions(self._actions_for(key))
 
-    def _actions_for(self, key: str) -> list[QPushButton]:
+    def _actions_for(self, key: str) -> list[QWidget]:
         if key == "regions":
             return [
                 self._region_actions["add"],
+                self._regions_sep,
                 self._region_actions["show"],
                 self._region_actions["hide"],
                 self._region_actions["lock"],
@@ -506,8 +602,6 @@ class ShellWindow(QMainWindow):
             ]
         if key == "hunt_history":
             return [self._hunt_mode_button]
-        if key == "about":
-            return [self._donate_button]
         return []
 
     def navigate_to(self, key: str) -> None:

@@ -226,6 +226,24 @@ QPushButton[variant="ghost"]:hover {{
     color: {p.text_primary};
 }}
 
+/* Icon-only ghost button: square, centered icon, subtle hover halo.
+   Use for bulk / secondary actions that benefit from compactness
+   (e.g. Show/Hide/Lock/Unlock in the page header). Pair with tooltip. */
+QPushButton[variant="icon"] {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: {r.md}px;
+    padding: 0;
+    color: {p.text_secondary};
+}}
+QPushButton[variant="icon"]:hover {{
+    background-color: {p.bg_hover};
+    border-color: {p.border_subtle};
+    color: {p.text_primary};
+}}
+QPushButton[variant="icon"]:pressed {{ background-color: {p.bg_pressed}; }}
+QPushButton[variant="icon"]:focus {{ border-color: {p.accent}; outline: none; }}
+
 /* Preset swatches: 18x18 color chips with a thick hover ring for tactile
    feedback. Border bumped to 2 px so the chip reads as a "button" rather
    than a plain div. */
@@ -427,6 +445,69 @@ QScrollBar::handle:horizontal {{
 }}
 QScrollBar::handle:horizontal:hover {{ background: {p.text_muted}; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+
+/* -- Navigation rail -------------------------------------------------------
+   Left-side page switcher. Background sits one step below the app chrome
+   so the content area reads as the foreground surface. Nav buttons gain
+   a 3 px accent bar on their leading edge when checked -- a Jurojin
+   trademark and a far clearer "selected row" cue than pure background
+   shading. */
+QWidget#NavRail {{
+    background-color: {p.bg_app};
+    border-right: 1px solid {p.border_subtle};
+}}
+
+QToolButton[role="nav"] {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-left: 3px solid transparent;
+    border-radius: {r.md}px;
+    padding: {s.xs}px {s.md}px;
+    color: {p.text_secondary};
+    text-align: left;
+    font-weight: {t.weight_medium};
+}}
+QToolButton[role="nav"]:hover {{
+    background-color: {p.bg_hover};
+    color: {p.text_primary};
+}}
+QToolButton[role="nav"]:checked {{
+    background-color: {p.accent_soft_rgba};
+    border-left: 3px solid {p.accent};
+    color: {p.text_primary};
+    font-weight: {t.weight_bold};
+}}
+QToolButton[role="nav"]:focus {{ outline: none; }}
+
+QToolButton[role="nav-footer"] {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: {r.md}px;
+    padding: {s.xs}px {s.md}px;
+    color: {p.text_secondary};
+    text-align: left;
+}}
+QToolButton[role="nav-footer"]:hover {{
+    background-color: {p.bg_hover};
+    color: {p.danger};
+    border-color: {p.border_subtle};
+}}
+
+/* Vertical divider used between header action clusters. */
+QFrame[role="vline"] {{
+    background-color: {p.border_subtle};
+    max-width: 1px;
+    min-width: 1px;
+    border: none;
+}}
+
+/* Empty-state placeholder inside cards (e.g. "No regions yet"). */
+QLabel[role="empty-state"] {{
+    color: {p.text_muted};
+    font-style: italic;
+    padding: {s.lg}px;
+    qproperty-alignment: AlignCenter;
+}}
 """
 
 
