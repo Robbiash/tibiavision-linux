@@ -32,8 +32,9 @@ from .battle_list import BattleListAnalyzer
 from .cooldown_cv import CooldownAnalyzer
 from .copilot import CopilotAnalyzer
 from .equipment import EquipmentAnalyzer
-from .login_name import LoginNameAnalyzer
+from .login_name import LoginNameAnalyzer  # deprecated; superseded by PresetWatcher
 from .ocr import OCRAnalyzer
+from .preset_watcher import PresetWatcher
 from .server_log import ServerLogAnalyzer
 from .swing_timer import SwingTimerAnalyzer
 
@@ -57,6 +58,7 @@ __all__ = [
     "EventKind",
     "LoginNameAnalyzer",
     "OCRAnalyzer",
+    "PresetWatcher",
     "ServerLogAnalyzer",
     "SwingTimerAnalyzer",
 ]

@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from ..smart_hud import HudPanel
 from .audio_timer_panel import AudioTimerPanel
+from .hotbar_panel import HotbarPanel
 from .metronome_panel import MetronomePanel
 
 __all__ = [
     "AudioTimerPanel",
+    "HotbarPanel",
     "HudPanel",
     "MetronomePanel",
 ]

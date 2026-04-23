@@ -1,40 +1,38 @@
-"""Stub: character-name detector for dynamic vocation auto-switching.
+"""Deprecated OCR-based login detector.
 
-Planned v2 implementation:
+.. deprecated:: Phase 4
+    Superseded by :class:`tvlinux.analyzers.preset_watcher.PresetWatcher`,
+    which derives the same "character switched" signal from Tibia's own
+    ``clientoptions.json`` without OCR.
 
-1. User designates a ROI over the top-left character name (the same place
-   Tibia prints it above the HP bar).
-2. Every ~2 s, OCR the region. The text is short and stable so a single
-   high-confidence read is usually enough.
-3. Maintain a ``_last_name`` field; only emit
-   :data:`EventKind.LOGIN_DETECTED` when the detected name *changes* from
-   the previous value. Payload: ``{"name": str, "previous": str | None}``.
-4. Phase 2's trigger engine subscribes to this event and asks
-   :class:`~tvlinux.profiles.ProfileManager` to hot-swap the active profile
-   to one named after the detected character.
-
-The 2 s cadence is plenty -- character switches happen at human speed -- and
-cheap enough that we could ratchet it down later if auto-switch latency
-becomes user-visible.
-
-Kept as a pure stub in v1.
+The class is retained as a thin shim so any ``triggers.json`` written
+against the old ``analyzer_id`` keeps loading, and so external docs
+pointing at :class:`LoginNameAnalyzer` still import cleanly.
 """
 
 from __future__ import annotations
+
+import warnings
 
 from .base import Analyzer, AnalyzerFrame, Event
 
 
 class LoginNameAnalyzer(Analyzer):
+    """No-op stub kept for backwards compatibility. See module docstring."""
+
     id = "login_name"
     tick_ms = 2000
 
     def __init__(self) -> None:
         super().__init__()
         self.enabled = False
-        # v2 will populate this from the first successful OCR and compare
-        # against subsequent reads to decide when to emit LOGIN_DETECTED.
-        self._last_name: str | None = None
+        warnings.warn(
+            "LoginNameAnalyzer is deprecated; use PresetWatcher "
+            "(tvlinux.analyzers.preset_watcher) which reads Tibia's "
+            "clientoptions.json instead of OCR.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     def analyze(self, frame: AnalyzerFrame) -> list[Event]:
         return []

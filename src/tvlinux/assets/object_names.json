@@ -1,0 +1,37 @@
+{
+    "_comment": "Tibia useObject id -> human name. Community-editable. Falls back to '#id' for unknowns. Users can override / extend by creating <config_dir>/object_names.json (same format) -- that file wins over this one.",
+    "_version": 1,
+
+    "237": "great mana potion",
+    "236": "strong mana potion",
+    "268": "mana potion",
+    "238": "strong health potion",
+    "239": "great health potion",
+    "266": "health potion",
+    "7642": "ultimate spirit potion",
+    "7643": "ultimate health potion",
+    "7644": "ultimate mana potion",
+    "26029": "supreme health potion",
+    "26030": "supreme mana potion",
+    "26031": "supreme spirit potion",
+    "6558": "great spirit potion",
+
+    "3155": "magic wall rune",
+    "3160": "sudden death rune",
+    "3161": "ultimate healing rune",
+    "3180": "great fireball rune",
+    "3188": "ultimate healing rune",
+    "3191": "magic wall rune",
+    "3192": "sudden death rune",
+    "3200": "great fireball rune",
+
+    "3031": "gold coin",
+    "3035": "platinum coin",
+    "3043": "crystal coin",
+
+    "3048": "blank rune",
+    "3092": "strong mana potion",
+    "3097": "boots",
+    "3175": "small stone",
+    "3456": "hand axe"
+}
