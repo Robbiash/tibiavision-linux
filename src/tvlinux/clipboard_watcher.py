@@ -18,24 +18,21 @@ careful to:
   (CI, headless tests without ``qapp`` fixture) -- the watcher becomes
   a no-op rather than raising at import.
 
-The bus events we publish are:
-
-* :data:`~tvlinux.analyzers.base.EventKind.HUNT_STATS_UPDATE` -- payload
-  is the :class:`~tvlinux.hunt_parser.HuntSession` flattened via
-  ``dataclasses.asdict`` (plus the ``captured_at`` monotonic timestamp
-  for downstream live extrapolation).
-* :data:`~tvlinux.analyzers.base.EventKind.PARTY_HUNT_UPDATE` -- same
-  shape but for :class:`~tvlinux.hunt_parser.PartyHuntSession`.
+**Hunt Mode gating**: when a :class:`HuntModeManager` is passed, the
+watcher is completely silent while Hunt Mode is off -- no parsing, no
+events, no history logging. This is what lets the app stay quiet outside
+of active play.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QClipboard, QGuiApplication
 
 from .analyzers import AnalyzerHub, Event, EventKind
+from .hunt_mode import HuntModeManager
 from .hunt_parser import parse_hunt_analyser, parse_party_hunt
 from .logging_config import get_logger
 
@@ -46,21 +43,28 @@ class ClipboardWatcher(QObject):
     """Watch the OS clipboard and publish Tibia hunt-stats events.
 
     :param bus: the application event bus.
+    :param hunt_mode: optional gate. When provided, clipboard events are
+        ignored while Hunt Mode is off.
     :param clipboard: optional clipboard override (tests). If ``None`` we
         use :meth:`QGuiApplication.clipboard`.
     """
 
     id = "clipboard_watcher"
 
+    hunt_captured = Signal(object, str)  # (HuntSession, raw_text)
+    party_captured = Signal(object, str)  # (PartyHuntSession, raw_text)
+
     def __init__(
         self,
         bus: AnalyzerHub,
         *,
+        hunt_mode: HuntModeManager | None = None,
         clipboard: QClipboard | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._bus = bus
+        self._mode = hunt_mode
         self._last_payload: str | None = None
 
         if clipboard is None:
@@ -83,8 +87,12 @@ class ClipboardWatcher(QObject):
         """Process a clipboard string. Exposed for tests.
 
         Publishes at most one event per distinct payload: repeated copies
-        of the same string are swallowed by the dedupe check.
+        of the same string are swallowed by the dedupe check. When a
+        :class:`HuntModeManager` is configured and currently inactive,
+        the method is a silent no-op.
         """
+        if self._mode is not None and not self._mode.active:
+            return
         if not isinstance(text, str) or not text.strip():
             return
         if text == self._last_payload:
@@ -109,6 +117,7 @@ class ClipboardWatcher(QObject):
                     data=asdict(party),
                 )
             )
+            self.party_captured.emit(party, text)
 
         if hunt is not None:
             self._bus.publish(
@@ -118,6 +127,7 @@ class ClipboardWatcher(QObject):
                     data=asdict(hunt),
                 )
             )
+            self.hunt_captured.emit(hunt, text)
 
     # -- Slots -----------------------------------------------------------------
 
