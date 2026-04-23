@@ -7,8 +7,6 @@ from pathlib import Path
 from tvlinux.audio_timers import AudioTimerManager
 from tvlinux.hunt_history import HuntHistoryStore
 from tvlinux.hunt_mode import HuntModeManager
-from tvlinux.hunt_refresh import HuntRefresher
-from tvlinux.key_listener import PassiveKeyListener
 from tvlinux.regions import RegionManager
 from tvlinux.shell import PAGES, ShellWindow
 
@@ -16,15 +14,11 @@ from tvlinux.shell import PAGES, ShellWindow
 def _make_shell(tmp_path: Path) -> ShellWindow:
     regions = RegionManager()
     mode = HuntModeManager(path=tmp_path / "mode.json")
-    listener = PassiveKeyListener()
-    refresher = HuntRefresher(mode)
     audio = AudioTimerManager(path=tmp_path / "audio.json")
     hist = HuntHistoryStore(path=tmp_path / "hist.json")
     return ShellWindow(
         regions=regions,
         hunt_mode=mode,
-        refresher=refresher,
-        key_listener=listener,
         audio_timers=audio,
         hunt_history=hist,
     )

@@ -4,7 +4,15 @@
 
 TibiaVision-Linux is a **pure, read-only screen-mirroring application**. From the point of view
 of the Tibia client and BattlEye, it is functionally identical to OBS Studio, Discord screen share,
-or the GNOME/KDE screenshot tool. We do not, at any point:
+or the GNOME/KDE screenshot tool.
+
+**Hunt stats refresh only when *you* press Tibia's built-in "Copy to clipboard" menu entry.**
+The app watches the OS clipboard, not Tibia. We never synthesize clicks, never synthesize keystrokes,
+never observe keyboard input, and never call `uinput` or any input-injection API. There is no
+"Hunt Mode auto-click," no passive key listener, and no calibration of in-game click targets --
+those code paths were removed so the binary cannot do those things even in principle.
+
+We do not, at any point:
 
 - Read or write Tibia's process memory (`ptrace`, `/proc/<pid>/mem`, `process_vm_readv`, ...).
 - Inject code, DLLs, `.so`s, or any shared library into the Tibia process.

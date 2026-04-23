@@ -44,8 +44,6 @@ from .hud_panels import (
 )
 from .hunt_history import HuntHistoryStore, HuntRecord
 from .hunt_mode import HuntModeManager
-from .hunt_refresh import HuntRefresher
-from .key_listener import PassiveKeyListener
 from .logging_config import get_logger
 from .mirror_window import MirrorWindow
 from .paths import triggers_path
@@ -81,23 +79,15 @@ class Application(QObject):
         self._last_frame: QImage | None = None
         self._picker: RegionPickerDialog | None = None
 
-        # Phase 5 -- Hunt Mode foundation. Everything in this block is cheap
-        # to construct (no network / no subprocesses) and lazy about actually
-        # doing work until Hunt Mode is toggled on.
+        # Hunt Mode foundation. The app never interacts with Tibia: the
+        # clipboard watcher and history auto-logger only react when the
+        # user themselves presses Tibia's "Copy to clipboard" menu entry.
         self._hunt_mode = HuntModeManager(parent=self)
         self._hunt_history = HuntHistoryStore()
-        self._key_listener = PassiveKeyListener(
-            trigger_key=self._hunt_mode.config.trigger_key,
-            tibia_window_substring=self._hunt_mode.config.tibia_window_substring,
-            parent=self,
-        )
-        self._refresher = HuntRefresher(self._hunt_mode, parent=self)
 
         self._control = ShellWindow(
             regions=self._regions,
             hunt_mode=self._hunt_mode,
-            refresher=self._refresher,
-            key_listener=self._key_listener,
             audio_timers=self._audio,
             hunt_history=self._hunt_history,
         )
@@ -142,14 +132,8 @@ class Application(QObject):
         # writes to disk so the history survives restarts.
         self._clipboard_watcher.hunt_captured.connect(self._on_hunt_captured)
 
-        # Phase 5 -- passive key listener fires the refresher, which does
-        # its own rate-limiting. No grabs; Tibia still sees the key.
-        self._key_listener.key_pressed.connect(self._on_passive_key)
+        # Keep the tray checkbox in sync with the master Hunt Mode toggle.
         self._hunt_mode.toggled.connect(self._on_hunt_mode_toggled)
-        # Start the listener opportunistically so it's already observing by
-        # the time the user turns Hunt Mode on for the first time.
-        if self._hunt_mode.config.trigger_key_enabled:
-            self._key_listener.start()
 
         # Smart HUD: strictly click-through overlay that hosts pluggable
         # HudPanel instances. Adding a new panel is a single file + one
@@ -235,9 +219,6 @@ class Application(QObject):
         self._act_hunt_mode.setChecked(self._hunt_mode.active)
         self._act_hunt_mode.toggled.connect(self._hunt_mode.set_active)
 
-        act_refresh_now = QAction("Refresh hunt stats now", menu)
-        act_refresh_now.triggered.connect(lambda: self._refresher.fire_once("tray"))
-
         act_audio = QAction("Audio timers...", menu)
         act_audio.triggered.connect(self._open_audio_timers)
         act_cycle = QAction("Cycle profile", menu)
@@ -251,7 +232,6 @@ class Application(QObject):
         menu.addAction(act_show)
         menu.addSeparator()
         menu.addAction(self._act_hunt_mode)
-        menu.addAction(act_refresh_now)
         menu.addSeparator()
         menu.addAction(act_audio)
         menu.addAction(self._act_toggle_hud)
@@ -430,26 +410,8 @@ class Application(QObject):
             f"Captured hunt: profit {rec.balance} gp " f"({rec.session_sec // 60}m session)"
         )
 
-    def _on_passive_key(self, key_name: str) -> None:
-        """Passive trigger key fired -> ask the refresher to click if ready."""
-        cfg = self._hunt_mode.config
-        if not cfg.trigger_key_enabled:
-            return
-        fired = self._refresher.fire_once(reason=f"key:{key_name}")
-        if fired:
-            self._control.set_status("Hunt refresh fired")
-
     def _on_hunt_mode_toggled(self, active: bool) -> None:
-        """Start / stop the passive listener when Hunt Mode flips.
-
-        The listener is cheap to keep running (no CPU until a key arrives),
-        but we stop it while Hunt Mode is off so the app really is silent
-        on that channel -- no focus lookups, no subprocess probes.
-        """
-        if active and self._hunt_mode.config.trigger_key_enabled:
-            self._key_listener.start()
-        else:
-            self._key_listener.stop()
+        """Keep the tray checkbox in sync with the master Hunt Mode flag."""
         if hasattr(self, "_act_hunt_mode"):
             self._act_hunt_mode.setChecked(active)
 

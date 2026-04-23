@@ -1,33 +1,30 @@
-"""Hunt Mode -- global on/off gate for the hunt clipboard pipeline.
+"""Hunt Mode -- global on/off gate for the clipboard -> HUD pipeline.
 
-Hunt Mode is the single switch that decides whether the clipboard watcher,
-passive key listener, auto-refresh timer, and history auto-logging actually do
-anything. Flipping it off makes the app completely quiet on those channels so
-the user pays no ambient cost when they are not actively playing.
+Hunt Mode is the single switch that decides whether the clipboard watcher
+and history auto-logging actually do anything. Flipping it off makes the
+app completely quiet on those channels so the user pays no ambient cost
+when they are not actively playing.
+
+The app never interacts with Tibia directly. Fresh hunt stats arrive only
+when the user themselves presses Tibia's built-in "Copy to clipboard"
+menu item; the OS clipboard change is what this module gates.
 
 Config shape (persisted to ``config_dir()/hunt_mode.json``)::
 
     {
-        "active": false,                    # master toggle
-        "trigger_key": "space",             # passive key that triggers a refresh
-        "trigger_key_enabled": true,        # listen to the key at all
-        "min_refresh_interval_sec": 60,     # rate-limit between refreshes
-        "auto_fire_fallback_sec": 0,        # 0 = off; otherwise fire every N s
-        "tibia_window_substring": "Tibia",  # focus-filter match
-        "copy_anchor_hunt": {"right_click_x": 0, "right_click_y": 0,
-                             "menu_x": 0, "menu_y": 0} | None,
-        "copy_anchor_party": {...} | None,
-        "auto_log_to_history": true         # Hunt Analyser pastes feed history
+        "active": false,              # master toggle
+        "auto_log_to_history": true   # Hunt Analyser pastes feed history
     }
 
-This module is intentionally tiny -- all the actual work (listening, clicking,
-logging) lives in dedicated modules that consume a ``HuntModeManager``.
+This module is intentionally tiny -- all the actual work (clipboard
+parsing, history persistence) lives in dedicated modules that consume a
+``HuntModeManager``.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -38,59 +35,14 @@ from .paths import config_dir
 log = get_logger(__name__)
 
 
-@dataclass(frozen=True)
-class CopyAnchor:
-    """Screen-coordinate pair for replaying a 'right-click + Copy' dance."""
-
-    right_click_x: int
-    right_click_y: int
-    menu_x: int
-    menu_y: int
-
-    def to_dict(self) -> dict[str, int]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, int] | None) -> CopyAnchor | None:
-        if not data:
-            return None
-        try:
-            return cls(
-                right_click_x=int(data["right_click_x"]),
-                right_click_y=int(data["right_click_y"]),
-                menu_x=int(data["menu_x"]),
-                menu_y=int(data["menu_y"]),
-            )
-        except (KeyError, TypeError, ValueError):
-            return None
-
-
 @dataclass
 class HuntModeConfig:
     active: bool = False
-    trigger_key: str = "space"
-    trigger_key_enabled: bool = True
-    min_refresh_interval_sec: int = 60
-    auto_fire_fallback_sec: int = 0
-    tibia_window_substring: str = "Tibia"
-    copy_anchor_hunt: CopyAnchor | None = None
-    copy_anchor_party: CopyAnchor | None = None
     auto_log_to_history: bool = True
 
     def to_dict(self) -> dict:
         return {
             "active": self.active,
-            "trigger_key": self.trigger_key,
-            "trigger_key_enabled": self.trigger_key_enabled,
-            "min_refresh_interval_sec": int(self.min_refresh_interval_sec),
-            "auto_fire_fallback_sec": int(self.auto_fire_fallback_sec),
-            "tibia_window_substring": self.tibia_window_substring,
-            "copy_anchor_hunt": (
-                self.copy_anchor_hunt.to_dict() if self.copy_anchor_hunt else None
-            ),
-            "copy_anchor_party": (
-                self.copy_anchor_party.to_dict() if self.copy_anchor_party else None
-            ),
             "auto_log_to_history": self.auto_log_to_history,
         }
 
@@ -98,13 +50,6 @@ class HuntModeConfig:
     def from_dict(cls, data: dict) -> HuntModeConfig:
         return cls(
             active=bool(data.get("active", False)),
-            trigger_key=str(data.get("trigger_key", "space")),
-            trigger_key_enabled=bool(data.get("trigger_key_enabled", True)),
-            min_refresh_interval_sec=int(data.get("min_refresh_interval_sec", 60)),
-            auto_fire_fallback_sec=int(data.get("auto_fire_fallback_sec", 0)),
-            tibia_window_substring=str(data.get("tibia_window_substring", "Tibia")),
-            copy_anchor_hunt=CopyAnchor.from_dict(data.get("copy_anchor_hunt")),
-            copy_anchor_party=CopyAnchor.from_dict(data.get("copy_anchor_party")),
             auto_log_to_history=bool(data.get("auto_log_to_history", True)),
         )
 
@@ -120,9 +65,8 @@ class HuntModeManager(QObject):
 
     - Single source of truth. Everywhere else reads from ``self.config``.
     - Cheap to import and construct; no I/O unless callers ask for it.
-    - Signal-driven: consumers (ClipboardWatcher, PassiveKeyListener,
-      HuntRefresher, StatusFooter) just wire to ``toggled`` / ``config_changed``
-      and never have to poll.
+    - Signal-driven: consumers (ClipboardWatcher, StatusFooter) just wire
+      to ``toggled`` / ``config_changed`` and never have to poll.
     """
 
     toggled = Signal(bool)  # new active state
@@ -165,7 +109,8 @@ class HuntModeManager(QObject):
 
         ``active`` changes still fire ``toggled``; all changes fire
         ``config_changed``. Unknown kwargs are ignored so callers can pass
-        through form state without filtering.
+        through form state without filtering (and so legacy keys from
+        older versions quietly drop on load).
         """
         valid = {f for f in HuntModeConfig.__dataclass_fields__}
         patch = {k: v for k, v in kwargs.items() if k in valid}
@@ -197,7 +142,6 @@ class HuntModeManager(QObject):
 
 
 __all__ = [
-    "CopyAnchor",
     "HuntModeConfig",
     "HuntModeManager",
     "hunt_mode_path",

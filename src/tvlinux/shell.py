@@ -47,8 +47,6 @@ from PySide6.QtWidgets import (
 from .audio_timers import AudioTimerManager
 from .hunt_history import HuntHistoryStore
 from .hunt_mode import HuntModeManager
-from .hunt_refresh import HuntRefresher
-from .key_listener import PassiveKeyListener
 from .pages import (
     AboutPage,
     AudioTimersPage,
@@ -440,8 +438,6 @@ class ShellWindow(QMainWindow):
         self,
         regions: RegionManager,
         hunt_mode: HuntModeManager,
-        refresher: HuntRefresher,
-        key_listener: PassiveKeyListener,
         audio_timers: AudioTimerManager,
         hunt_history: HuntHistoryStore,
         parent: QWidget | None = None,
@@ -454,7 +450,7 @@ class ShellWindow(QMainWindow):
         self.setMinimumSize(880, 560)
 
         self._build_chrome(hunt_mode)
-        self._build_pages(hunt_mode, refresher, key_listener, audio_timers, hunt_history)
+        self._build_pages(hunt_mode, audio_timers, hunt_history)
         self._build_header_actions()
         self.nav.set_current("regions")
         self._on_nav("regions")
@@ -508,15 +504,13 @@ class ShellWindow(QMainWindow):
     def _build_pages(
         self,
         hunt_mode: HuntModeManager,
-        refresher: HuntRefresher,
-        key_listener: PassiveKeyListener,
         audio_timers: AudioTimerManager,
         hunt_history: HuntHistoryStore,
     ) -> None:
         self.regions_page = RegionsPage(self._regions, self)
         self.hunt_history_page = HuntHistoryPage(hunt_history, self)
         self.audio_timers_page = AudioTimersPage(audio_timers, self)
-        self.settings_page = SettingsPage(hunt_mode, refresher, key_listener, self)
+        self.settings_page = SettingsPage(hunt_mode, self)
         self.about_page = AboutPage(self)
 
         self.pages_by_key: dict[str, QWidget] = {

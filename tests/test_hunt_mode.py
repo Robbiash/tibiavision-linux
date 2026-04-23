@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tvlinux.hunt_mode import CopyAnchor, HuntModeConfig, HuntModeManager
+from tvlinux.hunt_mode import HuntModeConfig, HuntModeManager
 
 
 def test_default_config_is_off(tmp_path: Path, qapp) -> None:
     mgr = HuntModeManager(path=tmp_path / "mode.json")
     assert mgr.active is False
-    assert mgr.config.trigger_key == "space"
-    assert mgr.config.min_refresh_interval_sec == 60
+    assert mgr.config.auto_log_to_history is True
 
 
 def test_set_active_emits_toggled_and_persists(tmp_path: Path, qapp) -> None:
@@ -23,34 +22,45 @@ def test_set_active_emits_toggled_and_persists(tmp_path: Path, qapp) -> None:
     assert seen == [True]
     mgr.set_active(True)  # idempotent
     assert seen == [True]
-    # Reloaded state matches persisted state.
     mgr2 = HuntModeManager(path=p)
     assert mgr2.active is True
 
 
 def test_update_config_merges(tmp_path: Path, qapp) -> None:
     mgr = HuntModeManager(path=tmp_path / "mode.json")
-    mgr.update_config(trigger_key="f11", min_refresh_interval_sec=30)
-    assert mgr.config.trigger_key == "f11"
-    assert mgr.config.min_refresh_interval_sec == 30
+    mgr.update_config(auto_log_to_history=False)
+    assert mgr.config.auto_log_to_history is False
     assert mgr.config.active is False  # unchanged
 
 
-def test_copy_anchor_roundtrip() -> None:
-    a = CopyAnchor(10, 20, 30, 40)
-    d = a.to_dict()
-    b = CopyAnchor.from_dict(d)
-    assert b == a
-    assert CopyAnchor.from_dict(None) is None
-    assert CopyAnchor.from_dict({"bad": "payload"}) is None
+def test_update_config_ignores_legacy_keys(tmp_path: Path, qapp) -> None:
+    """Old configs carried trigger_key / calibration fields; these must
+    be silently dropped so upgrading users don't crash on load."""
+    mgr = HuntModeManager(path=tmp_path / "mode.json")
+    mgr.update_config(trigger_key="f11", min_refresh_interval_sec=30)  # type: ignore[call-arg]
+    assert not hasattr(mgr.config, "trigger_key")
+    assert mgr.config.auto_log_to_history is True
 
 
 def test_config_roundtrip() -> None:
-    cfg = HuntModeConfig(
-        active=True,
-        trigger_key="f12",
-        min_refresh_interval_sec=45,
-        copy_anchor_hunt=CopyAnchor(1, 2, 3, 4),
-    )
+    cfg = HuntModeConfig(active=True, auto_log_to_history=False)
     cfg2 = HuntModeConfig.from_dict(cfg.to_dict())
     assert cfg2 == cfg
+
+
+def test_from_dict_drops_legacy_fields() -> None:
+    """Legacy JSON on disk (trigger_key, copy anchors, ...) must load."""
+    legacy = {
+        "active": True,
+        "auto_log_to_history": False,
+        "trigger_key": "f11",
+        "trigger_key_enabled": True,
+        "min_refresh_interval_sec": 30,
+        "auto_fire_fallback_sec": 0,
+        "tibia_window_substring": "Tibia",
+        "copy_anchor_hunt": {"right_click_x": 1, "right_click_y": 2, "menu_x": 3, "menu_y": 4},
+        "copy_anchor_party": None,
+    }
+    cfg = HuntModeConfig.from_dict(legacy)
+    assert cfg.active is True
+    assert cfg.auto_log_to_history is False
