@@ -38,6 +38,8 @@ class EventKind:
     EQUIP_UPDATE = "EQUIP_UPDATE"
     LOOT_LOGGED = "LOOT_LOGGED"
     LOGIN_DETECTED = "LOGIN_DETECTED"
+    # Phase 4 additions.
+    PIXEL_WATCH_CHANGED = "PIXEL_WATCH_CHANGED"
 
 
 @dataclass

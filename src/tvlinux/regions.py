@@ -11,10 +11,12 @@ manager without instantiating a QApplication.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from PySide6.QtCore import QObject, QRect, Signal
+
+WatchMode = Literal["off", "change"]
 
 
 @dataclass
@@ -42,6 +44,11 @@ class Region:
     border_color: str = "#0f8fbf"
     corner_radius: int = 12
     track_cooldown: bool = False
+    # Pixel-watchdog mode. ``"off"`` = ignore, ``"change"`` = emit a
+    # ``PIXEL_WATCH_CHANGED`` event whenever the region's captured pixels
+    # change (see :class:`tvlinux.analyzers.pixel_watch.PixelWatchAnalyzer`).
+    # Default is off so existing regions behave exactly as before.
+    watch_mode: WatchMode = "off"
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -67,11 +74,24 @@ class Region:
             border_color=str(data.get("border_color", "#0f8fbf")),
             corner_radius=int(data.get("corner_radius", 12)),
             track_cooldown=bool(data.get("track_cooldown", False)),
+            watch_mode=_coerce_watch_mode(data.get("watch_mode")),
         )
 
 
 def _rect_to_list(r: QRect) -> list[int]:
     return [r.x(), r.y(), r.width(), r.height()]
+
+
+def _coerce_watch_mode(v: Any) -> WatchMode:
+    """Accept only known values; everything else falls back to ``"off"``.
+
+    Guards against a future schema change that adds e.g. ``"threshold"``
+    modes -- old clients opening a new profile won't explode, they'll just
+    disable the feature on that region.
+    """
+    if v == "change":
+        return "change"
+    return "off"
 
 
 def _list_to_rect(v: Any) -> QRect | None:

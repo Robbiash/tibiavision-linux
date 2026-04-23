@@ -78,6 +78,7 @@ class ControlPanel(QMainWindow):
     border_color_requested = Signal(UUID, str)
     corner_radius_requested = Signal(UUID, int)
     toggle_track_cooldown_requested = Signal(UUID, bool)
+    toggle_watch_mode_requested = Signal(UUID, str)  # WatchMode ("off"|"change")
     show_all_requested = Signal(bool)
     lock_all_requested = Signal(bool)
 
@@ -518,18 +519,32 @@ class ControlPanel(QMainWindow):
         item = self._list.itemAt(pos)
         if item is None:
             return
+        region_id: UUID = item.data(ROLE_REGION_ID)
+        region = self._regions.get(region_id)
+
         menu = QMenu(self)
         act_rename = menu.addAction("Rename...")
         act_delete = menu.addAction("Delete")
+        menu.addSeparator()
+        # Pixel watchdog toggle. Text flips based on current mode so one
+        # menu entry handles both directions; a checkbox would also work
+        # but this reads faster at a glance.
+        is_watching = region is not None and region.watch_mode == "change"
+        watch_label = "Stop watching pixels" if is_watching else "Watch pixels here"
+        act_watch = menu.addAction(watch_label)
+
         chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
         if chosen is act_rename:
             new_name, ok = QInputDialog.getText(
                 self, "Rename region", "New name:", text=item.text()
             )
             if ok and new_name.strip():
-                self.rename_region_requested.emit(item.data(ROLE_REGION_ID), new_name.strip())
+                self.rename_region_requested.emit(region_id, new_name.strip())
         elif chosen is act_delete:
-            self.delete_region_requested.emit(item.data(ROLE_REGION_ID))
+            self.delete_region_requested.emit(region_id)
+        elif chosen is act_watch:
+            new_mode = "off" if is_watching else "change"
+            self.toggle_watch_mode_requested.emit(region_id, new_mode)
 
     def _on_delete_current(self) -> None:
         rid = self._current_region_id()

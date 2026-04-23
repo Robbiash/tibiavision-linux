@@ -175,7 +175,30 @@ def default_rules() -> list[Rule]:
                 ],
                 "cooldown_ms": 1000,
             }
-        )
+        ),
+        # Visibility rule for the general-purpose pixel watchdog. On its
+        # own this does nothing you can't do by tailing the log -- but it
+        # gives users a concrete "rule fires when my watched region
+        # changes" breadcrumb to copy + customise in ``triggers.json``.
+        Rule.from_dict(
+            {
+                "id": "log-pixel-watch-changed",
+                "when": "PIXEL_WATCH_CHANGED",
+                "if": [],
+                "then": [
+                    {
+                        "action": "log",
+                        "args": {
+                            "level": "info",
+                            "message": "Pixel-watch region changed",
+                        },
+                    }
+                ],
+                # Tight but non-zero: a single real change can take a few
+                # frames to settle, and we don't want one alert per frame.
+                "cooldown_ms": 250,
+            }
+        ),
     ]
 
 
