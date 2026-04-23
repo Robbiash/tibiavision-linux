@@ -30,12 +30,19 @@ from PySide6.QtWidgets import (
 )
 
 from . import __app_name__, app_icon_path
-from .analyzers import AnalyzerHub
+from .analyzers import AnalyzerHub, PixelWatchAnalyzer, PresetWatcher
 from .audio_timers import AudioTimer, AudioTimerManager, AudioTimersDialog
 from .capture import CaptureCore
+from .clipboard_watcher import ClipboardWatcher
 from .control_panel import ControlPanel
 from .donate_dialog import DonateDialog
-from .hud_panels import AudioTimerPanel, MetronomePanel
+from .hud_panels import (
+    AudioTimerPanel,
+    HotbarPanel,
+    HuntStatsPanel,
+    MetronomePanel,
+    PartyPanel,
+)
 from .logging_config import get_logger
 from .mirror_window import MirrorWindow
 from .paths import triggers_path
@@ -99,12 +106,23 @@ class Application(QObject):
             self._triggers.set_rules(default_rules())
         self._triggers.rule_fired.connect(self._on_rule_fired)
 
+        # Phase 4 - TibiaCompanion Intelligence Layer. Each of these plugs
+        # into the existing ``AnalyzerHub`` (a.k.a. EventBus); no special
+        # orchestration needed here.
+        self._preset_watcher = PresetWatcher(self._hub, parent=self)
+        self._pixel_watch = PixelWatchAnalyzer(self._regions)
+        self._hub.register(self._pixel_watch)
+        self._clipboard_watcher = ClipboardWatcher(self._hub, parent=self)
+
         # Smart HUD: strictly click-through overlay that hosts pluggable
         # HudPanel instances. Adding a new panel is a single file + one
         # register_panel() call below; SmartHud itself stays untouched.
         self._hud = SmartHud(bus=self._hub, parent=None)
         self._hud.register_panel(AudioTimerPanel(self._audio))
         self._hud.register_panel(MetronomePanel())
+        self._hud.register_panel(HotbarPanel(self._hub))
+        self._hud.register_panel(HuntStatsPanel(self._hub))
+        self._hud.register_panel(PartyPanel(self._hub))
 
         self._build_tray()
         self._wire_signals()
