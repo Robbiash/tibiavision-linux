@@ -25,14 +25,22 @@ from PySide6.QtWidgets import (
 from .theme import TOKENS
 
 
-def card(parent: QWidget | None = None) -> QFrame:
+class _Card(QFrame):
+    """Rounded surface container. Attribute ``body_layout`` is the QVBoxLayout
+    that children should be added to (avoids `.layout()` returning ``Optional``).
+    """
+
+    body_layout: QVBoxLayout
+
+
+def card(parent: QWidget | None = None) -> _Card:
     """Return a rounded surface container used for grouping controls.
 
     The returned frame has ``objectName == "Card"`` so the global QSS
     (``QFrame#Card``) applies its background / border / radius automatically.
-    Callers attach a ``QVBoxLayout`` (or similar) to it and add children.
+    Callers attach children via ``frame.body_layout.addWidget(...)``.
     """
-    frame = QFrame(parent)
+    frame = _Card(parent)
     frame.setObjectName("Card")
     frame.setFrameShape(QFrame.Shape.NoFrame)
     layout = QVBoxLayout(frame)
@@ -41,6 +49,7 @@ def card(parent: QWidget | None = None) -> QFrame:
     # cards rather than on drop-shadows for depth.
     layout.setContentsMargins(s.lg, s.lg, s.lg, s.lg)
     layout.setSpacing(s.sm)
+    frame.body_layout = layout
     return frame
 
 

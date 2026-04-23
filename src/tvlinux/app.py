@@ -31,10 +31,9 @@ from PySide6.QtWidgets import (
 
 from . import __app_name__, app_icon_path
 from .analyzers import AnalyzerHub, PixelWatchAnalyzer, PresetWatcher
-from .audio_timers import AudioTimer, AudioTimerManager, AudioTimersDialog
+from .audio_timers import AudioTimer, AudioTimerManager
 from .capture import CaptureCore
 from .clipboard_watcher import ClipboardWatcher
-from .control_panel import ControlPanel
 from .donate_dialog import DonateDialog
 from .hud_panels import (
     AudioTimerPanel,
@@ -43,12 +42,17 @@ from .hud_panels import (
     MetronomePanel,
     PartyPanel,
 )
+from .hunt_history import HuntHistoryStore, HuntRecord
+from .hunt_mode import HuntModeManager
+from .hunt_refresh import HuntRefresher
+from .key_listener import PassiveKeyListener
 from .logging_config import get_logger
 from .mirror_window import MirrorWindow
 from .paths import triggers_path
 from .profiles import ProfileManager
 from .region_picker import RegionPickerDialog
 from .regions import Region, RegionManager
+from .shell import ShellWindow
 from .shortcuts import GlobalShortcutManager, ShortcutSpec
 from .smart_hud import SmartHud
 from .snap import SNAP_THRESHOLD, MirrorGroupManager, compute_snap
@@ -76,9 +80,27 @@ class Application(QObject):
         self._groups = MirrorGroupManager()
         self._last_frame: QImage | None = None
         self._picker: RegionPickerDialog | None = None
-        self._audio_dialog: AudioTimersDialog | None = None
 
-        self._control = ControlPanel(self._regions)
+        # Phase 5 -- Hunt Mode foundation. Everything in this block is cheap
+        # to construct (no network / no subprocesses) and lazy about actually
+        # doing work until Hunt Mode is toggled on.
+        self._hunt_mode = HuntModeManager(parent=self)
+        self._hunt_history = HuntHistoryStore()
+        self._key_listener = PassiveKeyListener(
+            trigger_key=self._hunt_mode.config.trigger_key,
+            tibia_window_substring=self._hunt_mode.config.tibia_window_substring,
+            parent=self,
+        )
+        self._refresher = HuntRefresher(self._hunt_mode, parent=self)
+
+        self._control = ShellWindow(
+            regions=self._regions,
+            hunt_mode=self._hunt_mode,
+            refresher=self._refresher,
+            key_listener=self._key_listener,
+            audio_timers=self._audio,
+            hunt_history=self._hunt_history,
+        )
         self._capture = CaptureCore(use_portal=use_portal, parent=self)
 
         # v2 analyzer hub. Pre-wired so enabling analyzers in v2 is a one-liner here:
@@ -112,7 +134,22 @@ class Application(QObject):
         self._preset_watcher = PresetWatcher(self._hub, parent=self)
         self._pixel_watch = PixelWatchAnalyzer(self._regions)
         self._hub.register(self._pixel_watch)
-        self._clipboard_watcher = ClipboardWatcher(self._hub, parent=self)
+        self._clipboard_watcher = ClipboardWatcher(
+            self._hub, hunt_mode=self._hunt_mode, parent=self
+        )
+        # Auto-log captured hunts to the history store when the user has
+        # opted in via ``auto_log_to_history`` (default: on). The store
+        # writes to disk so the history survives restarts.
+        self._clipboard_watcher.hunt_captured.connect(self._on_hunt_captured)
+
+        # Phase 5 -- passive key listener fires the refresher, which does
+        # its own rate-limiting. No grabs; Tibia still sees the key.
+        self._key_listener.key_pressed.connect(self._on_passive_key)
+        self._hunt_mode.toggled.connect(self._on_hunt_mode_toggled)
+        # Start the listener opportunistically so it's already observing by
+        # the time the user turns Hunt Mode on for the first time.
+        if self._hunt_mode.config.trigger_key_enabled:
+            self._key_listener.start()
 
         # Smart HUD: strictly click-through overlay that hosts pluggable
         # HudPanel instances. Adding a new panel is a single file + one
@@ -160,6 +197,7 @@ class Application(QObject):
         self._control.export_profile_requested.connect(self._export_profile)
         self._control.open_audio_timers_requested.connect(self._open_audio_timers)
         self._control.donate_requested.connect(self._show_donate)
+        self._control.toggle_watch_mode_requested.connect(self._set_watch_mode)
 
         # Region model -> mirrors
         self._regions.region_added.connect(self._create_mirror)
@@ -191,6 +229,15 @@ class Application(QObject):
         menu = QMenu()
         act_show = QAction("Show control panel", menu)
         act_show.triggered.connect(self._show_control)
+
+        self._act_hunt_mode = QAction("Hunt Mode", menu)
+        self._act_hunt_mode.setCheckable(True)
+        self._act_hunt_mode.setChecked(self._hunt_mode.active)
+        self._act_hunt_mode.toggled.connect(self._hunt_mode.set_active)
+
+        act_refresh_now = QAction("Refresh hunt stats now", menu)
+        act_refresh_now.triggered.connect(lambda: self._refresher.fire_once("tray"))
+
         act_audio = QAction("Audio timers...", menu)
         act_audio.triggered.connect(self._open_audio_timers)
         act_cycle = QAction("Cycle profile", menu)
@@ -202,6 +249,10 @@ class Application(QObject):
         act_quit = QAction("Quit", menu)
         act_quit.triggered.connect(self._quit)
         menu.addAction(act_show)
+        menu.addSeparator()
+        menu.addAction(self._act_hunt_mode)
+        menu.addAction(act_refresh_now)
+        menu.addSeparator()
         menu.addAction(act_audio)
         menu.addAction(self._act_toggle_hud)
         menu.addSeparator()
@@ -355,6 +406,53 @@ class Application(QObject):
         r.track_cooldown = bool(on)
         self._regions.update(r)
 
+    def _set_watch_mode(self, region_id: UUID, mode: str) -> None:
+        r = self._regions.get(region_id)
+        if r is None:
+            return
+        r.watch_mode = "change" if mode == "change" else "off"
+        self._regions.update(r)
+        self._profiles.save_to_disk()
+
+    # -- Phase 5 -- Hunt Mode glue --------------------------------------------
+
+    def _on_hunt_captured(self, session, raw_text: str) -> None:  # type: ignore[no-untyped-def]
+        """Append a freshly-captured hunt to the persistent history store."""
+        if not self._hunt_mode.config.auto_log_to_history:
+            return
+        try:
+            rec = HuntRecord.from_session(session, raw_text=raw_text)
+        except (TypeError, AttributeError):
+            return
+        self._hunt_history.add(rec)
+        self._control.hunt_history_page.refresh()
+        self._control.set_status(
+            f"Captured hunt: profit {rec.balance} gp " f"({rec.session_sec // 60}m session)"
+        )
+
+    def _on_passive_key(self, key_name: str) -> None:
+        """Passive trigger key fired -> ask the refresher to click if ready."""
+        cfg = self._hunt_mode.config
+        if not cfg.trigger_key_enabled:
+            return
+        fired = self._refresher.fire_once(reason=f"key:{key_name}")
+        if fired:
+            self._control.set_status("Hunt refresh fired")
+
+    def _on_hunt_mode_toggled(self, active: bool) -> None:
+        """Start / stop the passive listener when Hunt Mode flips.
+
+        The listener is cheap to keep running (no CPU until a key arrives),
+        but we stop it while Hunt Mode is off so the app really is silent
+        on that channel -- no focus lookups, no subprocess probes.
+        """
+        if active and self._hunt_mode.config.trigger_key_enabled:
+            self._key_listener.start()
+        else:
+            self._key_listener.stop()
+        if hasattr(self, "_act_hunt_mode"):
+            self._act_hunt_mode.setChecked(active)
+
     # -- Mirror lifecycle -------------------------------------------------------------
 
     def _create_mirror(self, region: Region) -> None:
@@ -499,11 +597,9 @@ class Application(QObject):
         dlg.exec()
 
     def _open_audio_timers(self) -> None:
-        if self._audio_dialog is None:
-            self._audio_dialog = AudioTimersDialog(self._audio, self._control)
-        self._audio_dialog.show()
-        self._audio_dialog.raise_()
-        self._audio_dialog.activateWindow()
+        """Show the main window on the Audio Timers page."""
+        self._show_control()
+        self._control.navigate_to("audio_timers")
 
     def _register_shortcuts(self) -> None:
         shortcuts = [
