@@ -27,6 +27,24 @@ def per_hour(value: int, duration: timedelta) -> int:
     return int(value / (seconds / 3600.0))
 
 
+def humanize_duration(seconds: int) -> str:
+    """Render a duration in seconds as a compact ``1h23m`` style string.
+
+    Used by history rows where the column is narrow and the "01:23:45"
+    format wastes space. Rounds to whole minutes above one hour.
+    """
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    h, rem = divmod(s, 3600)
+    m = rem // 60
+    if m == 0:
+        return f"{h}h"
+    return f"{h}h{m:02d}m"
+
+
 def humanize_gp(value: int) -> str:
     """Render a (possibly negative) gold amount as a short display string.
 
@@ -94,6 +112,7 @@ def live_extrapolate(
 
 
 __all__ = [
+    "humanize_duration",
     "humanize_gp",
     "live_extrapolate",
     "party_count",
