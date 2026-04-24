@@ -39,6 +39,7 @@ from ..ui_helpers import (
     CollapsibleCard,
     apply_color_swatch,
     color_picker_button,
+    empty_state,
     hline,
 )
 
@@ -103,13 +104,21 @@ class RegionsPage(QWidget):
         delete_shortcut.activated.connect(self._on_delete_current)
         regions_card.body_layout.addWidget(self._list)
 
-        # Empty-state hint shown only when the region list is empty.
-        self._empty_hint = QLabel(
-            "No regions yet — click  Add region  to create your first.",
-            regions_card,
+        # Empty-state: far more inviting than a plain "No regions yet"
+        # label -- a first-run user lands here and the primary action
+        # is obvious. Keeps the same visibility contract as before
+        # (shown only when the list is empty).
+        self._empty_hint = empty_state(
+            icon_name="layers",
+            title="No regions yet",
+            subtitle=(
+                "Pick a rectangle on the live Tibia feed and we will stream it "
+                "into a draggable mirror window."
+            ),
+            action_label="Create your first region",
+            on_action=self.add_region_requested.emit,
+            parent=regions_card,
         )
-        self._empty_hint.setProperty("role", "empty-state")
-        self._empty_hint.setWordWrap(True)
         regions_card.body_layout.addWidget(self._empty_hint)
 
         self._detail = self._build_detail_scroll()

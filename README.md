@@ -60,6 +60,16 @@ layer any packages onto the host.
 - GStreamer 1.24 with the `pipewire` plugin (`gstreamer1.0-pipewire` on Debian, bundled in the KDE
   Platform runtime on Flatpak)
 - An XDG Desktop Portal backend (`xdg-desktop-portal-kde`, `...-gnome`, or `...-wlr`)
+- **Strongly recommended on Wayland:** `layer-shell-qt` (Fedora:
+  `kf6-layer-shell-qt`; bundled in the KDE Flatpak runtime). When present on a compositor that
+  implements `wlr-layer-shell-v1` (KDE Plasma 6, Sway, Hyprland), mirror overlays sit above
+  fullscreen Tibia windows by protocol. The app requests this integration by setting
+  `QT_WAYLAND_SHELL_INTEGRATION=layer-shell` before Qt's Wayland plugin loads; if the Qt Wayland
+  shell-integration plugin or the library can't load (e.g. a Qt ABI mismatch in a dev env),
+  Qt transparently falls back to `xdg-shell` and our reactive re-raise path takes over. That
+  fallback is reliable for borderless-windowed Tibia on compositors that honor
+  `WindowStaysOnTopHint`, but cannot beat true fullscreen on GNOME / Mutter -- for that case,
+  switch to **Companion view** (Settings -> Mirror placement).
 
 ## Safety and Terms of Service
 

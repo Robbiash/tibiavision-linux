@@ -27,8 +27,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPlainTextEdit,
     QSizePolicy,
+    QStackedLayout,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -41,7 +43,7 @@ from ..hunt_parser import parse_hunt_analyser, parse_party_hunt
 from ..loot_split import format_transfers_block, split, split_from_party
 from ..stats_math import humanize_duration, humanize_gp
 from ..theme import TOKENS
-from ..ui_helpers import card, muted_label, pill_button, section_label
+from ..ui_helpers import card, empty_state, muted_label, pill_button, section_label
 
 COLS = ["Date", "Character", "Duration", "XP/h", "Profit", "Damage/h", "Notes"]
 
@@ -66,12 +68,18 @@ class HuntHistoryPage(QWidget):
 
         toolbar = QHBoxLayout()
         self._btn_paste = pill_button("Paste session", variant="primary", parent=self)
+        self._btn_paste.setToolTip("Paste raw Hunt Analyser text from Tibia")
+        self._btn_paste.setAccessibleDescription(
+            "Open a dialog that parses a Hunt Analyser paste into a session"
+        )
         self._btn_paste.clicked.connect(self._open_paste_dialog)
         toolbar.addWidget(self._btn_paste)
         self._btn_split = pill_button("Loot split", parent=self)
+        self._btn_split.setToolTip("Open the party loot split calculator")
         self._btn_split.clicked.connect(self._open_split_dialog)
         toolbar.addWidget(self._btn_split)
         self._btn_delete = pill_button("Delete", variant="danger", parent=self)
+        self._btn_delete.setToolTip("Delete the selected session")
         self._btn_delete.clicked.connect(self._delete_selected)
         toolbar.addWidget(self._btn_delete)
         toolbar.addStretch(1)
@@ -85,19 +93,50 @@ class HuntHistoryPage(QWidget):
         table_card = card(self)
         tcl = table_card.body_layout
         tcl.addWidget(section_label("SESSIONS", table_card))
-        self._table = QTableWidget(0, len(COLS), table_card)
+
+        # Stacked host so we can swap the table with a friendlier empty
+        # state when there are no records yet. QStackedLayout keeps both
+        # widgets hot so the swap is instant on first insert.
+        self._table_host = QWidget(table_card)
+        self._table_stack = QStackedLayout(self._table_host)
+        self._table_stack.setContentsMargins(0, 0, 0, 0)
+
+        # Friendlier first-run widget: centred icon, heading, short
+        # subtitle, and a clear primary action ("Paste session") that
+        # mirrors the toolbar button so a beginner never needs to hunt
+        # for the import flow.
+        self._empty_state = empty_state(
+            icon_name="line-chart",
+            title="No hunts logged yet",
+            subtitle=(
+                "Turn Hunt Mode on, then press Tibia's \u201cCopy to clipboard\u201d on your "
+                "Hunt Analyser or Party Hunt window. You can also paste a session manually."
+            ),
+            action_label="Paste session",
+            on_action=self._open_paste_dialog,
+            parent=self._table_host,
+        )
+
+        self._table = QTableWidget(0, len(COLS), self._table_host)
         self._table.setHorizontalHeaderLabels(COLS)
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
+        self._table.setShowGrid(False)
+        self._table.verticalHeader().setDefaultSectionSize(28)
+        self._table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setStretchLastSection(True)
+        header.setHighlightSections(False)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         self._table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        tcl.addWidget(self._table)
+
+        self._table_stack.addWidget(self._table)
+        self._table_stack.addWidget(self._empty_state)
+        tcl.addWidget(self._table_host)
         body.addWidget(table_card, 3)
 
         detail_card = card(self)
@@ -121,6 +160,10 @@ class HuntHistoryPage(QWidget):
 
     def refresh(self) -> None:
         records = self._store.all()
+        # Show the friendly empty state when there are no records, and
+        # the real table as soon as the first one arrives.
+        self._table_stack.setCurrentIndex(1 if not records else 0)
+        self._btn_delete.setEnabled(False)
         self._table.setRowCount(len(records))
         for row, rec in enumerate(records):
             ts = datetime.fromtimestamp(rec.captured_at).strftime("%Y-%m-%d %H:%M")
@@ -162,6 +205,7 @@ class HuntHistoryPage(QWidget):
         items = self._table.selectedItems()
         if not items:
             self._selected_id = None
+            self._btn_delete.setEnabled(False)
             self._refresh_detail()
             return
         rid = items[0].data(Qt.ItemDataRole.UserRole)
@@ -172,6 +216,7 @@ class HuntHistoryPage(QWidget):
                 self._selected_id = UUID(str(rid))
             except ValueError:
                 self._selected_id = None
+        self._btn_delete.setEnabled(self._selected_id is not None)
         self._refresh_detail()
 
     def _selected_record(self) -> HuntRecord | None:
@@ -223,6 +268,17 @@ class HuntHistoryPage(QWidget):
         rec = self._selected_record()
         if rec is None:
             return
+        ts = datetime.fromtimestamp(rec.captured_at).strftime("%Y-%m-%d %H:%M")
+        label = rec.character or "Unknown"
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Delete hunt?")
+        box.setText(f"Delete the hunt for {label} ({ts})?")
+        box.setInformativeText("This permanently removes the session from Hunt History.")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
         self._store.remove(rec.id)
         self._selected_id = None
         self.refresh()
@@ -235,8 +291,12 @@ class HuntHistoryPage(QWidget):
             return
         session = parse_hunt_analyser(text)
         if session is None:
-            self._summary_label.setText(
-                "Could not parse the pasted text as a Hunt Analyser session."
+            QMessageBox.warning(
+                self,
+                "Couldn't read that as a hunt",
+                "The pasted text doesn't look like a Tibia Hunt Analyser session.\n\n"
+                "In Tibia, right-click the Hunt Analyser widget and choose "
+                "\u201cCopy to clipboard\u201d, then try again.",
             )
             return
         rec = HuntRecord.from_session(session, raw_text=text)

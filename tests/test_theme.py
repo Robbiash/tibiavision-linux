@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 
-from tvlinux.theme import TOKENS, Palette, Tokens, build_qss
+from tvlinux.theme import TOKENS, Elevation, Motion, Palette, Tokens, Type, build_qss
 
 
 def test_every_palette_color_is_referenced_in_qss():
@@ -30,3 +30,29 @@ def test_build_qss_respects_custom_tokens():
     assert "#ff00ff" in qss
     # And the default accent is *not* in the output anymore.
     assert TOKENS.palette.accent not in qss
+
+
+def test_motion_tokens_have_ordered_durations():
+    # Motion values live on the token tree but are consumed by Python
+    # animation code rather than the QSS; just make sure they exist
+    # and are ordered sanely so feature code can trust them.
+    m = TOKENS.motion
+    assert isinstance(m, Motion)
+    assert 0 < m.duration_fast_ms < m.duration_normal_ms < m.duration_slow_ms
+
+
+def test_elevation_tokens_are_non_negative():
+    e = TOKENS.elevation
+    assert isinstance(e, Elevation)
+    assert e.card_blur_radius > 0
+    assert 0 <= e.card_shadow_alpha <= 255
+
+
+def test_type_tracking_tokens_present_in_qss():
+    # Typography tokens are consumed in ``letter-spacing`` rules, so
+    # changing them should actually land in the rendered stylesheet.
+    qss = build_qss(TOKENS)
+    t = TOKENS.type
+    assert isinstance(t, Type)
+    assert f"{t.tracking_caption_px}px" in qss
+    assert f"{t.tracking_display_px}px" in qss

@@ -204,9 +204,7 @@ class PartyPanel(HudPanel):
 
         y = rect.top() + _PADDING + _HEADER_HEIGHT
         for idx, member in enumerate(members):
-            colour = (
-                QColor(palette.success) if member.balance >= 0 else QColor(palette.danger)
-            )
+            colour = QColor(palette.success) if member.balance >= 0 else QColor(palette.danger)
             icon = self._icons.arrow_up if member.balance >= 0 else self._icons.arrow_down
 
             # Icon.
@@ -221,9 +219,7 @@ class PartyPanel(HudPanel):
             # slightly dimmed so the eye naturally lands on the MVP row.
             painter.setFont(name_font)
             name_colour = (
-                QColor(palette.text_primary)
-                if idx == 0
-                else QColor(palette.text_secondary)
+                QColor(palette.text_primary) if idx == 0 else QColor(palette.text_secondary)
             )
             painter.setPen(name_colour)
 
@@ -231,9 +227,7 @@ class PartyPanel(HudPanel):
             value_width = 110.0
             name_width = rect.right() - _PADDING - value_width - name_left
             name_rect = QRectF(name_left, y, name_width, _ROW_HEIGHT)
-            name = fm_name.elidedText(
-                member.name, Qt.TextElideMode.ElideRight, name_rect.width()
-            )
+            name = fm_name.elidedText(member.name, Qt.TextElideMode.ElideRight, name_rect.width())
             painter.drawText(
                 name_rect,
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),

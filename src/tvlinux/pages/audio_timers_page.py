@@ -18,13 +18,14 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QProgressBar,
+    QStackedLayout,
     QVBoxLayout,
     QWidget,
 )
 
 from ..audio_timers import MAX_HOTKEY_SLOTS, AudioTimer, AudioTimerManager
 from ..theme import TOKENS
-from ..ui_helpers import card, pill_button, section_label
+from ..ui_helpers import card, empty_state, pill_button, section_label
 
 
 class AudioTimersPage(QWidget):
@@ -50,9 +51,33 @@ class AudioTimersPage(QWidget):
         list_card = card(self)
         list_layout = list_card.body_layout
         list_layout.addWidget(section_label("TIMERS", list_card))
-        self._list = QListWidget(list_card)
+
+        # Stacked host: QListWidget when the user has at least one
+        # timer, a friendly EmptyState (with a "New timer" CTA) when
+        # they do not. Keeps both hot so swaps on the first/last
+        # timer insertion are immediate.
+        self._list_host = QWidget(list_card)
+        self._list_stack = QStackedLayout(self._list_host)
+        self._list_stack.setContentsMargins(0, 0, 0, 0)
+
+        self._list = QListWidget(self._list_host)
         self._list.currentRowChanged.connect(self._on_row_changed)
-        list_layout.addWidget(self._list)
+
+        self._empty_state = empty_state(
+            icon_name="volume-2",
+            title="No timers yet",
+            subtitle=(
+                "Create a timer for spell cooldowns, boss respawns, or stew eating. "
+                "Each timer can bind a hotkey and play a sound when it fires."
+            ),
+            action_label="New timer",
+            on_action=self._add_timer,
+            parent=self._list_host,
+        )
+
+        self._list_stack.addWidget(self._list)
+        self._list_stack.addWidget(self._empty_state)
+        list_layout.addWidget(self._list_host)
         outer.addWidget(list_card, 2)
 
         detail_card = card(self)
@@ -126,6 +151,9 @@ class AudioTimersPage(QWidget):
             self._list.setCurrentRow(row)
         else:
             self._on_row_changed(self._list.currentRow())
+        # Flip between the live list and the empty-state widget. Index
+        # 0 is the list (normal), index 1 is the empty-state CTA.
+        self._list_stack.setCurrentIndex(0 if self._list.count() > 0 else 1)
 
     def _on_row_changed(self, _row: int) -> None:
         t = self._current_timer()

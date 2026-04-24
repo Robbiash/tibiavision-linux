@@ -105,15 +105,25 @@ class PartyHuntSession:
     captured_at: float = field(default_factory=time.monotonic)
 
 
-# ``1,234,567`` OR ``1.234.567`` OR ``1 234 567``. Tibia emits the same
-# comma-separated form on every locale we've seen, but accepting the
-# others costs nothing and dodges a class of future bugs.
-_NUMBER_RE = re.compile(r"-?[\d.,\s]+")
+# ``1,234,567`` OR ``1.234.567`` OR ``1 234 567`` embedded in a larger
+# string like ``"1,234,567 gp (after tax)"``.
+_NUMBER_RE = re.compile(r"[-\u2212]?\d[\d.,\s\u00a0]*")
 
 
 def _parse_int(raw: str) -> int | None:
-    """Strip thousands separators and coerce to int."""
-    cleaned = raw.strip().replace(",", "").replace(".", "").replace(" ", "").replace("\u00a0", "")
+    """Extract and parse the first integer-looking token in ``raw``.
+
+    We intentionally accept decorated values such as ``"1,234 gp"`` and
+    ``"21,279,710 (5,319,927 each)"`` because Tibia clipboard payloads and
+    third-party tools may append helper text after the number.
+    """
+    normalized = raw.strip().replace("\u2212", "-").replace("\u2013", "-")
+    match = _NUMBER_RE.search(normalized)
+    if match is None:
+        return None
+    cleaned = (
+        match.group(0).replace(",", "").replace(".", "").replace(" ", "").replace("\u00a0", "")
+    )
     if not cleaned or cleaned == "-":
         return None
     try:
@@ -142,7 +152,7 @@ def _extract_field(lines: list[str], name: str) -> str | None:
     for line in lines:
         stripped = line.strip()
         if stripped.lower().startswith(prefix):
-            return stripped[len(prefix):].strip()
+            return stripped[len(prefix) :].strip()
     return None
 
 

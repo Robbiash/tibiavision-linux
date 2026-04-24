@@ -30,7 +30,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--no-portal",
         action="store_true",
-        help="Skip the XDG ScreenCast portal and use QScreen.grabWindow fallback.",
+        help=(
+            "Skip the XDG ScreenCast portal. Diagnostic flag only -- no "
+            "fallback capture pipeline is wired up, so the app will start "
+            "without any live frames."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -57,6 +61,27 @@ def main(argv: list[str] | None = None) -> int:
         import os
 
         os.environ["QT_QPA_PLATFORM"] = "xcb"
+
+    # Opt this process into wlr-layer-shell BEFORE constructing
+    # QApplication. Qt's Wayland platform plugin reads
+    # QT_WAYLAND_SHELL_INTEGRATION exactly once, at QGuiApplication
+    # construction time, to decide between xdg-shell (default) and
+    # layer-shell. If we call this after QApplication, every QWindow
+    # is stuck as an xdg-toplevel for the whole process -- which KWin
+    # will cheerfully stack below a fullscreen or focused Tibia
+    # window, no matter how many times we call raise_() later. This
+    # is a hard upstream constraint; see
+    # :func:`tvlinux.layer_shell.prepare_qt_integration`.
+    #
+    # Safe on X11 (returns False, no env mutation), safe without
+    # the library installed (the Qt Wayland plugin's layer-shell
+    # integration handles missing LayerShellQt by falling back to
+    # xdg-shell when *it* fails to load, not us).
+    from .layer_shell import prepare_qt_integration
+
+    layer_shell_ready = prepare_qt_integration()
+    if layer_shell_ready:
+        log.info("layer_shell.qt_integration_selected")
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)

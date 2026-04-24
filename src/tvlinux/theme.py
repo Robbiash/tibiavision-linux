@@ -33,6 +33,16 @@ class Palette:
     bg_hover: str = "#1E2536"
     bg_pressed: str = "#0F131C"
 
+    # Glass layers: translucent surfaces layered over ``bg_app``. Used on
+    # the nav rail, page header, and cards for a subtle "frosted" read
+    # without needing a compositor-level blur (unreliable on Wayland).
+    glass_nav_rgba: str = "rgba(11, 14, 20, 0.92)"
+    glass_header_rgba: str = "rgba(18, 22, 32, 0.82)"
+    glass_card_rgba: str = "rgba(21, 26, 37, 0.86)"
+    # 1 px rim used alongside the glass layers to give depth without a
+    # heavy drop shadow. Sits between bg_card and a faint neon tint.
+    border_neon_rgba: str = "rgba(0, 229, 255, 0.18)"
+
     border_subtle: str = "#222A3A"
     border_strong: str = "#333F58"
 
@@ -46,12 +56,20 @@ class Palette:
     accent_pressed: str = "#00B3CC"
     accent_fg: str = "#0B0E14"  # high-contrast dark text on neon buttons
     accent_soft_rgba: str = "rgba(0, 229, 255, 0.12)"
+    # Gradient stops for primary buttons / leading bars. Top stop is a
+    # touch lighter than ``accent``, bottom stop a touch deeper, so the
+    # fill reads as a subtle vertical "glow" rather than a flat colour.
+    accent_glow_from: str = "#33F3FF"
+    accent_glow_to: str = "#00A8C2"
 
     success: str = "#10B981"  # neon green
     warning: str = "#F59E0B"
     danger: str = "#F43F5E"  # vibrant urgent rose/red
     danger_hover: str = "#FB7185"
     danger_pressed: str = "#E11D48"
+    # Matching gradient stops for the danger button variant.
+    danger_glow_from: str = "#FB7185"
+    danger_glow_to: str = "#BE123C"
 
 
 @dataclass(frozen=True)
@@ -98,6 +116,40 @@ class Type:
     weight_regular: int = 400
     weight_medium: int = 500
     weight_bold: int = 600
+    # Typography rhythm tokens. Qt does not honour CSS ``line-height``
+    # on most widgets, but ``letter-spacing`` on labels works and adds
+    # crucial readability on uppercase captions during fast gameplay.
+    tracking_caption_px: float = 1.5
+    tracking_display_px: float = 0.3
+
+
+@dataclass(frozen=True)
+class Motion:
+    """Animation timing tokens consumed by :mod:`tvlinux.motion`.
+
+    Kept inside :class:`Tokens` so feature code can pull durations
+    from theme rather than re-hardcoding magic numbers. Motion values
+    are *not* required to appear in ``build_qss`` (they drive
+    ``QPropertyAnimation`` at runtime, not CSS).
+    """
+
+    duration_fast_ms: int = 120
+    duration_normal_ms: int = 200
+    duration_slow_ms: int = 320
+
+
+@dataclass(frozen=True)
+class Elevation:
+    """Shadow / depth tokens for :class:`QGraphicsDropShadowEffect`.
+
+    Applied sparingly -- cards get a soft downward blur, the donate
+    dialog gets a stronger halo. Normal buttons rely on colour / border
+    shifts for depth to keep the compositor cheap on Wayland.
+    """
+
+    card_blur_radius: int = 24
+    card_offset_y: int = 2
+    card_shadow_alpha: int = 70
 
 
 @dataclass(frozen=True)
@@ -107,6 +159,8 @@ class Tokens:
     spacing: Spacing = dataclasses.field(default_factory=Spacing)
     radius: Radius = dataclasses.field(default_factory=Radius)
     type: Type = dataclasses.field(default_factory=Type)
+    motion: Motion = dataclasses.field(default_factory=Motion)
+    elevation: Elevation = dataclasses.field(default_factory=Elevation)
 
 
 TOKENS = Tokens()
@@ -149,7 +203,14 @@ QLabel[role="caption"] {{
     font-size: {t.size_caption}pt;
     font-weight: {t.weight_bold};
     text-transform: uppercase;
-    letter-spacing: 1.5px;
+    letter-spacing: {t.tracking_caption_px}px;
+}}
+
+QLabel[role="display"] {{
+    color: {p.text_primary};
+    font-size: {t.size_display}pt;
+    font-weight: {t.weight_bold};
+    letter-spacing: {t.tracking_display_px}px;
 }}
 
 QLabel[role="muted"] {{
@@ -161,12 +222,19 @@ QLabel[role="warning"] {{ color: {p.warning}; font-weight: {t.weight_medium}; }}
 QLabel[role="danger"] {{ color: {p.danger}; font-weight: {t.weight_medium}; }}
 
 /* -- Cards (QFrame#Card) ----------------------------------------------------
-   Glassmorphic elevated surface. Ultra-thin border for depth, no heavy
-   shadow -- depth comes from the background delta with bg_surface. */
+   Glassmorphic elevated surface. Translucent ``glass_card_rgba`` layer
+   over the app chrome plus a 1 px neon rim reads as "lifted" without
+   any compositor blur. The opaque ``bg_card`` fallback keeps the card
+   legible on platforms where alpha channels fail (a real risk on
+   Wayland + NVIDIA, see mirror_window.py). */
 QFrame#Card {{
-    background-color: {p.bg_card};
-    border: 1px solid {p.border_subtle};
+    background-color: {p.glass_card_rgba};
+    border: 1px solid {p.border_neon_rgba};
     border-radius: {r.lg}px;
+}}
+QFrame#Card[role="opaque"] {{
+    background-color: {p.bg_card};
+    border-color: {p.border_subtle};
 }}
 
 QFrame[role="hline"] {{
@@ -198,17 +266,34 @@ QPushButton:disabled {{
     border-color: {p.border_subtle};
 }}
 
+/* Primary: vertical neon gradient (``accent_glow_from`` -> ``accent_glow_to``)
+   reads as a subtle glow rather than a flat fill, while keeping the
+   same brand colour envelope as the solid ``accent``. Hover cycles to
+   the brighter stop; pressed snaps to the darker one. */
 QPushButton[variant="primary"] {{
     background-color: {p.accent};
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 {p.accent_glow_from}, stop:1 {p.accent_glow_to}
+    );
     color: {p.accent_fg};
     font-weight: {t.weight_bold};
     border: 1px solid {p.accent_pressed};
 }}
-QPushButton[variant="primary"]:hover {{ background-color: {p.accent_hover}; }}
-QPushButton[variant="primary"]:pressed {{ background-color: {p.accent_pressed}; }}
+QPushButton[variant="primary"]:hover {{
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 {p.accent_hover}, stop:1 {p.accent_glow_from}
+    );
+}}
+QPushButton[variant="primary"]:pressed {{ background: {p.accent_pressed}; }}
 
 QPushButton[variant="danger"] {{
     background-color: {p.danger};
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 {p.danger_glow_from}, stop:1 {p.danger_glow_to}
+    );
     color: {p.accent_fg};
     font-weight: {t.weight_bold};
     border: 1px solid {p.danger_pressed};
@@ -281,6 +366,56 @@ QListWidget::item:selected, QListView::item:selected {{
 }}
 QListWidget::item:hover:!selected, QListView::item:hover:!selected {{
     background-color: {p.bg_hover};
+}}
+
+/* -- Tables -----------------------------------------------------------------
+   Hunt History and future data-heavy screens use QTableWidget. Without an
+   explicit style the stock Qt grid renders as a pale system-default table
+   that clashes with the rest of the dark UI. Match the card/list look:
+   transparent surface, subtle row stripes, neon accent for the selected
+   row, and a flat uppercase header that mirrors ``QLabel[role="caption"]``. */
+QTableView, QTableWidget {{
+    background-color: {p.bg_elevated};
+    alternate-background-color: {p.bg_card};
+    gridline-color: {p.border_subtle};
+    border: 1px solid {p.border_subtle};
+    border-radius: {r.md}px;
+    selection-background-color: {p.accent_soft_rgba};
+    selection-color: {p.text_primary};
+    color: {p.text_primary};
+    outline: none;
+}}
+QTableView::item, QTableWidget::item {{
+    padding: {s.xs}px {s.sm}px;
+    border: none;
+}}
+QTableView::item:selected, QTableWidget::item:selected {{
+    background-color: {p.accent_soft_rgba};
+    color: {p.text_primary};
+}}
+QTableView::item:hover:!selected, QTableWidget::item:hover:!selected {{
+    background-color: {p.bg_hover};
+}}
+QHeaderView {{
+    background-color: transparent;
+    border: none;
+}}
+QHeaderView::section {{
+    background-color: {p.bg_card};
+    color: {p.text_secondary};
+    padding: {s.xs}px {s.sm}px;
+    border: none;
+    border-bottom: 1px solid {p.border_subtle};
+    font-weight: {t.weight_bold};
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: {t.size_caption}pt;
+}}
+QHeaderView::section:hover {{ color: {p.text_primary}; }}
+QTableCornerButton::section {{
+    background-color: {p.bg_card};
+    border: none;
+    border-bottom: 1px solid {p.border_subtle};
 }}
 
 /* -- Inputs ----------------------------------------------------------------- */
@@ -453,8 +588,16 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
    trademark and a far clearer "selected row" cue than pure background
    shading. */
 QWidget#NavRail {{
-    background-color: {p.bg_app};
+    background-color: {p.glass_nav_rgba};
     border-right: 1px solid {p.border_subtle};
+}}
+
+/* Page header sits above the stacked content and reads as a floating
+   glass strip. Matches the nav rail's translucency so they feel like
+   the same surface turning a corner. */
+QWidget#PageHeader {{
+    background-color: {p.glass_header_rgba};
+    border-bottom: 1px solid {p.border_subtle};
 }}
 
 QToolButton[role="nav"] {{

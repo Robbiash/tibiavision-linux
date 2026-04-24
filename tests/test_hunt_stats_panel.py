@@ -54,9 +54,7 @@ def test_hunt_stats_panel_on_tick_advances_timer(qapp):
     bus = AnalyzerHub()
     panel = HuntStatsPanel(bus)
     session = _session(captured_at=time.monotonic() - 0.5)
-    bus.publish(
-        Event(analyzer_id="t", kind=EventKind.HUNT_STATS_UPDATE, data=asdict(session))
-    )
+    bus.publish(Event(analyzer_id="t", kind=EventKind.HUNT_STATS_UPDATE, data=asdict(session)))
     baseline = session.session.total_seconds() * 1000.0
     panel.on_tick(100.0)
     # ``live_extrapolate`` uses wall-clock monotonic time, so the live
@@ -87,7 +85,5 @@ def test_hunt_stats_panel_ignores_malformed_payload(qapp):
     bus = AnalyzerHub()
     panel = HuntStatsPanel(bus)
     # Missing most required keys -> panel must stay empty, not raise.
-    bus.publish(
-        Event(analyzer_id="t", kind=EventKind.HUNT_STATS_UPDATE, data={"session": 1.0})
-    )
+    bus.publish(Event(analyzer_id="t", kind=EventKind.HUNT_STATS_UPDATE, data={"session": 1.0}))
     assert panel.session is None

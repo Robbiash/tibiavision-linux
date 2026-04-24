@@ -308,7 +308,7 @@ class SmartHud(QWidget):
         return overrides
 
     def save_layout(self) -> None:
-        """Persist current panel positions. Called by a future drag UI."""
+        """Persist current panel positions. Used by :class:`HudLayoutEditor`."""
         payload = {
             "version": 1,
             "positions": {
@@ -319,6 +319,59 @@ class SmartHud(QWidget):
         tmp = self._layout_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp.replace(self._layout_path)
+
+    def apply_layout_overrides(self, positions: dict[str, QPointF]) -> None:
+        """Move each known panel's slot rect to ``positions[panel_id]``.
+
+        Called by the :class:`HudLayoutEditor` companion window after
+        the user drags tiles into place. Sizes are preserved -- only
+        the rect's top-left is updated -- so panels keep their
+        natural footprint.
+        """
+        for pid, pos in positions.items():
+            slot = self._slots.get(pid)
+            if slot is None:
+                continue
+            size = slot.panel.preferred_size()
+            slot.rect = QRectF(QPointF(float(pos.x()), float(pos.y())), size)
+        self.update()
+
+    def _slots_clear_overrides(self) -> None:
+        """Delete the override file and rebuild default anchor layout.
+
+        Exposed for the layout editor's "Reset" button. Named with a
+        leading underscore to flag it as editor plumbing rather than
+        part of the public HUD API.
+        """
+        try:
+            if self._layout_path.exists():
+                self._layout_path.unlink()
+        except OSError as e:
+            log.warning("hud.layout.reset_failed", error=str(e))
+        self._relayout()
+
+    def open_layout_editor(self, parent: QWidget | None = None) -> QWidget:
+        """Open (or focus) the companion :class:`HudLayoutEditor` window.
+
+        Safe to call multiple times: a second call while the editor is
+        open simply brings the existing window to the front instead of
+        spawning a duplicate.
+        """
+        # Local import avoids a cycle with hud_layout_editor importing
+        # SmartHud for type-checking only.
+        from .hud_layout_editor import HudLayoutEditor
+
+        existing = getattr(self, "_layout_editor", None)
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            return existing
+
+        editor = HudLayoutEditor(self, parent=parent)
+        editor.destroyed.connect(lambda *_: setattr(self, "_layout_editor", None))
+        self._layout_editor = editor
+        editor.show()
+        return editor
 
     def resizeEvent(self, event):  # type: ignore[override]
         super().resizeEvent(event)

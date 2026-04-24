@@ -320,6 +320,7 @@ class HuntStatsPanel(HudPanel):
             value,
         )
 
+
 def _format_duration_ms(ms: float) -> str:
     """Render live-extrapolated ms as ``HH:MM:SS``.
 

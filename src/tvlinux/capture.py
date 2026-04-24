@@ -90,7 +90,8 @@ class CaptureCore(QObject):
         self._running = True
         if not self._use_portal:
             self.errored.emit(
-                "Portal-less fallback is not wired up in this build. Re-run without --no-portal."
+                "Screen capture is disabled because --no-portal is set. "
+                "Quit the app and relaunch it without --no-portal to get live frames."
             )
             return
         self._start_async_thread()
@@ -176,7 +177,10 @@ class CaptureCore(QObject):
             Gst, _GstApp, GLib = _import_gst()
         except Exception as e:
             self.errored.emit(
-                f"GStreamer or pipewiresrc is missing; install gstreamer1-plugin-pipewire. ({e})"
+                "Couldn't start screen capture because GStreamer or the "
+                "PipeWire plugin is missing. On Fedora/Bazzite, install it "
+                "with: sudo dnf install gstreamer1-plugin-pipewire "
+                f"(details: {e})"
             )
             return
 

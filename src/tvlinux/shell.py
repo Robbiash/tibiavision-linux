@@ -4,10 +4,9 @@ The shell is the new top-level window for the app, replacing the legacy
 :class:`~tvlinux.control_panel.ControlPanel` main window with a cleaner,
 more scalable layout:
 
-- **NavRail** on the left: one vertical button per page. Keyboard-friendly
-  (each entry has a visible shortcut), screenreader-friendly (every entry
-  has an accessible name), and tiny enough that we don't need to squash
-  it on narrow monitors.
+- **NavRail** on the left: one vertical button per page. Screenreader-friendly
+  (every entry has an accessible name) and tiny enough that we don't need to
+  squash it on narrow monitors.
 - **PageHeader** at the top of the content area: shows the current page's
   title, a short subtitle, and a few page-scoped actions (add region, etc.).
 - **QStackedWidget** in the middle: each page is an independently built
@@ -26,8 +25,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QResizeEvent
+from PySide6.QtCore import Property, QRectF, Qt, Signal
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QPainter, QRadialGradient, QResizeEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -47,9 +46,11 @@ from PySide6.QtWidgets import (
 from .audio_timers import AudioTimerManager
 from .hunt_history import HuntHistoryStore
 from .hunt_mode import HuntModeManager
+from .motion import cross_fade, hover_ease, lerp, pulse, stop_pulse
 from .pages import (
     AboutPage,
     AudioTimersPage,
+    CompanionPage,
     HuntHistoryPage,
     RegionsPage,
     SettingsPage,
@@ -64,9 +65,14 @@ from .ui_helpers import default_icon_size, hline, icon, muted_label, pill_button
 PAGES: list[tuple[str, str, str]] = [
     # (key, label, subtitle)
     ("regions", "Regions", "Manage capture regions, colors, and behaviour."),
+    (
+        "companion",
+        "Companion",
+        "In-app live tiles for every region. Works when Tibia is fullscreen.",
+    ),
     ("hunt_history", "Hunt History", "Past hunts, loot split, notes."),
     ("audio_timers", "Audio Timers", "Countdown timers with sounds + global hotkeys."),
-    ("settings", "Settings", "Hunt Mode, trigger key, and calibration."),
+    ("settings", "Settings", "Hunt Mode master switch and capture behaviour."),
     ("about", "About", "What this app is and isn't."),
 ]
 
@@ -146,7 +152,7 @@ class NavRail(QWidget):
             "settings": "settings",
             "about": "info",
         }
-        for key, label, _subtitle in PAGES:
+        for key, label, subtitle in PAGES:
             btn = QToolButton(self)
             btn.setText(label)
             btn.setCheckable(True)
@@ -161,7 +167,20 @@ class NavRail(QWidget):
                 btn.sizePolicy().verticalPolicy(),
             )
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            # a11y + keyboard-nav surface. The subtitle is what the
+            # PageHeader shows, so re-using it here keeps screen
+            # reader output consistent with the visible caption.
+            btn.setToolTip(subtitle)
+            btn.setAccessibleName(label)
+            btn.setAccessibleDescription(subtitle)
+            btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             btn.clicked.connect(lambda _=False, k=key: self.navigated.emit(k))
+            # Micro-interaction: drive a dynamic hoverProgress property
+            # that QSS can't animate on its own. Under offscreen Qt this
+            # collapses to a snap (see motion.reduce_motion) so tests
+            # stay deterministic.
+            btn.setProperty("hoverProgress", 0.0)
+            hover_ease(btn)
             self._group.addButton(btn)
             self._buttons[key] = btn
             outer.addWidget(btn)
@@ -181,6 +200,11 @@ class NavRail(QWidget):
         self._donate_btn.setMinimumHeight(34)
         self._donate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._donate_btn.setToolTip("Support development")
+        self._donate_btn.setAccessibleName("Donate")
+        self._donate_btn.setAccessibleDescription("Support development")
+        self._donate_btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._donate_btn.setProperty("hoverProgress", 0.0)
+        hover_ease(self._donate_btn)
         self._donate_btn.clicked.connect(self.donate_clicked)
         outer.addWidget(self._donate_btn)
 
@@ -300,6 +324,77 @@ class PageHeader(QWidget):
 # -- Status footer -----------------------------------------------------------
 
 
+class _HuntDot(QWidget):
+    """Neon status dot with an optional breathing pulse.
+
+    Drawn rather than styled so we can animate both the fill opacity
+    and a soft outer glow off a single :func:`motion.pulse`. A plain
+    ``QLabel`` can't do either without a per-state QSS rewrite.
+
+    The widget exposes ``pulseT`` as a Qt property (0..1) so
+    :func:`motion.pulse` can interpolate it via ``QPropertyAnimation``.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._pulse_t = 1.0
+        self._active = False
+        self.setFixedSize(22, 22)
+
+    @Property(float)
+    def pulseT(self) -> float:
+        return self._pulse_t
+
+    @pulseT.setter  # type: ignore[no-redef]
+    def pulseT(self, value: float) -> None:
+        self._pulse_t = float(value)
+        self.update()
+
+    def set_active(self, active: bool) -> None:
+        """Flip the dot between muted-grey and pulsing-neon-green."""
+        if active == self._active:
+            return
+        self._active = active
+        if active:
+            pulse(self, prop=b"pulseT", min_value=0.55, max_value=1.0, period_ms=1600)
+        else:
+            stop_pulse(self)
+            self._pulse_t = 1.0
+        self.update()
+
+    def paintEvent(self, event):  # type: ignore[override]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(2.0, 2.0, -2.0, -2.0)
+        inner_r = min(rect.width(), rect.height()) / 2.0 - 3.0
+        centre = rect.center()
+
+        if self._active:
+            base = QColor(TOKENS.palette.success)
+            # Outer halo fades in/out with the pulse for a soft breath.
+            glow_radius = inner_r + 6.0 + 3.0 * self._pulse_t
+            grad = QRadialGradient(centre, glow_radius)
+            halo = QColor(base)
+            halo.setAlphaF(0.35 * self._pulse_t)
+            grad.setColorAt(0.0, halo)
+            halo_edge = QColor(base)
+            halo_edge.setAlphaF(0.0)
+            grad.setColorAt(1.0, halo_edge)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(grad)
+            painter.drawEllipse(centre, glow_radius, glow_radius)
+
+            fill = QColor(base)
+            fill.setAlphaF(lerp(0.65, 1.0, self._pulse_t))
+            painter.setBrush(fill)
+            painter.drawEllipse(centre, inner_r, inner_r)
+        else:
+            muted = QColor(TOKENS.palette.text_muted)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(muted)
+            painter.drawEllipse(centre, inner_r, inner_r)
+
+
 class StatusFooter(QWidget):
     """Hunt-mode dot + profile chip + status message."""
 
@@ -326,7 +421,9 @@ class StatusFooter(QWidget):
         )
         layout.setSpacing(TOKENS.spacing.md)
 
-        self._hunt_dot = QLabel("\u25cf", self)
+        self._hunt_dot = _HuntDot(self)
+        self._hunt_dot.setToolTip("Hunt Mode status indicator")
+        self._hunt_dot.setAccessibleName("Hunt Mode indicator")
         self._hunt_label = QLabel("Hunt Mode: off", self)
         layout.addWidget(self._hunt_dot)
         layout.addWidget(self._hunt_label)
@@ -353,8 +450,7 @@ class StatusFooter(QWidget):
 
     def _refresh_hunt_mode(self) -> None:
         on = self._mode.active
-        colour = TOKENS.palette.success if on else TOKENS.palette.text_muted
-        self._hunt_dot.setStyleSheet(f"color: {colour}; font-size: 18pt;")
+        self._hunt_dot.set_active(on)
         self._hunt_label.setText("Hunt Mode: ON" if on else "Hunt Mode: off")
 
     def set_status(self, text: str) -> None:
@@ -433,6 +529,9 @@ class ShellWindow(QMainWindow):
     # Tray / menu shortcuts
     open_audio_timers_requested = Signal()
     donate_requested = Signal()
+    hud_visibility_requested = Signal(bool)
+    open_hud_layout_editor_requested = Signal()
+    mirror_placement_changed = Signal(str)
 
     def __init__(
         self,
@@ -441,16 +540,19 @@ class ShellWindow(QMainWindow):
         audio_timers: AudioTimerManager,
         hunt_history: HuntHistoryStore,
         parent: QWidget | None = None,
+        *,
+        hud_visible: bool = True,
     ) -> None:
         super().__init__(parent)
         self._regions = regions
         self._mode = hunt_mode
+        self._tray_notice_shown = False
         self.setWindowTitle("TibiaVision-Linux")
         self.resize(1020, 720)
         self.setMinimumSize(880, 560)
 
         self._build_chrome(hunt_mode)
-        self._build_pages(hunt_mode, audio_timers, hunt_history)
+        self._build_pages(hunt_mode, audio_timers, hunt_history, hud_visible=hud_visible)
         self._build_header_actions()
         self.nav.set_current("regions")
         self._on_nav("regions")
@@ -506,15 +608,24 @@ class ShellWindow(QMainWindow):
         hunt_mode: HuntModeManager,
         audio_timers: AudioTimerManager,
         hunt_history: HuntHistoryStore,
+        *,
+        hud_visible: bool = True,
     ) -> None:
         self.regions_page = RegionsPage(self._regions, self)
+        self.companion_page = CompanionPage(self._regions, self)
         self.hunt_history_page = HuntHistoryPage(hunt_history, self)
         self.audio_timers_page = AudioTimersPage(audio_timers, self)
-        self.settings_page = SettingsPage(hunt_mode, self)
+        self.settings_page = SettingsPage(hunt_mode, self, hud_visible=hud_visible)
+        self.settings_page.hud_visibility_requested.connect(self.hud_visibility_requested)
+        self.settings_page.open_hud_layout_editor_requested.connect(
+            self.open_hud_layout_editor_requested
+        )
+        self.settings_page.mirror_placement_changed.connect(self.mirror_placement_changed)
         self.about_page = AboutPage(self)
 
         self.pages_by_key: dict[str, QWidget] = {
             "regions": self.regions_page,
+            "companion": self.companion_page,
             "hunt_history": self.hunt_history_page,
             "audio_timers": self.audio_timers_page,
             "settings": self.settings_page,
@@ -564,6 +675,14 @@ class ShellWindow(QMainWindow):
             btn.setFixedSize(36, 36)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip(tooltip)
+            # Icon-only buttons have no visible text, so screen readers
+            # and keyboard users see nothing without an accessible name.
+            # Mirror the tooltip so Orca announces something meaningful.
+            btn.setAccessibleName(tooltip)
+            btn.setAccessibleDescription(tooltip)
+            # Force strong focus so Tab can reach the bulk-action
+            # cluster; Qt defaults to TabFocus only on some platforms.
+            btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
             self.header.register_action(btn)
             return btn
 
@@ -605,7 +724,12 @@ class ShellWindow(QMainWindow):
         page = self.pages_by_key.get(key)
         if page is None:
             return
-        self.stack.setCurrentWidget(page)
+        # Eased cross-fade between pages. cross_fade() no-ops on same
+        # index and snaps under reduce_motion (offscreen Qt / opt-out
+        # env), so tests can still observe setCurrentIndex immediately.
+        target_index = self.stack.indexOf(page)
+        if target_index >= 0:
+            cross_fade(self.stack, target_index)
         title, subtitle = next(
             ((label, subtitle) for k, label, subtitle in PAGES if k == key),
             ("", ""),
@@ -639,6 +763,10 @@ class ShellWindow(QMainWindow):
     def set_profiles(self, names: list[str], current: str | None) -> None:
         self.footer.set_profiles(names, current)
 
+    def set_hud_visible(self, visible: bool) -> None:
+        """Sync the Settings page checkbox with tray-menu HUD toggles."""
+        self.settings_page.set_hud_visible(visible)
+
     # Below this window width the shell switches into a more compact
     # layout (slimmer nav rail, tighter header margins). Chosen so that
     # the default min-size (880px) just barely fits -- users dragging the
@@ -658,7 +786,42 @@ class ShellWindow(QMainWindow):
         # Hide to tray instead of actually quitting; the app lifecycle is
         # owned by the Application object, same as ControlPanel.
         event.ignore()
+        self._maybe_show_tray_notice()
         self.hide()
+
+    def _maybe_show_tray_notice(self) -> None:
+        """Explain once that closing just hides to the tray.
+
+        Uses ``QSettings`` so the message shows only on the first close,
+        regardless of which page the user was on. We avoid blocking the
+        hide() behind a modal so the close feels instant; the notice is
+        shown non-modally after the window is already hidden via QTimer.
+        """
+        if self._tray_notice_shown:
+            return
+        from PySide6.QtCore import QSettings
+
+        settings = QSettings()
+        already = bool(settings.value("ui/tray_close_notice_shown", False, type=bool))
+        if already:
+            self._tray_notice_shown = True
+            return
+        settings.setValue("ui/tray_close_notice_shown", True)
+        self._tray_notice_shown = True
+
+        box = QMessageBox(self)
+        box.setWindowTitle("TibiaVision is still running")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(
+            "Closing this window just hides it to the system tray.\n\n"
+            "The HUD overlay, audio timers, and global hotkeys keep working "
+            "in the background. Use the tray icon to reopen this window, or "
+            "choose \u201cQuit\u201d in the tray menu to fully exit."
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        # Show non-modally so we don't fight with the hide() call above.
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.show()
 
 
 __all__ = ["PAGES", "NavRail", "PageHeader", "ShellWindow", "StatusFooter"]

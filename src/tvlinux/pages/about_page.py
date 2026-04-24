@@ -18,29 +18,43 @@ from ..ui_helpers import card, pill_button, section_label
 _STATEMENT = """
 <p><b>Official Statement</b></p>
 <p>
-  TibiaVision-Linux is a <i>passive</i>, read-only screen-mirroring utility. It enhances
-  your display setup without any interaction with the Tibia game client, BattlEye
-  anti-cheat system, or game servers. It operates using only the standard Linux
-  <i>XDG Desktop Portal</i> (<code>org.freedesktop.portal.ScreenCast</code>) and the
-  PipeWire media framework already shipped with Bazzite, Fedora, and every modern
-  Linux desktop.
+  TibiaVision-Linux is a <i>passive</i>, read-only utility. It never sends input to Tibia,
+  never touches Tibia's memory or network, and never writes any Tibia file. Captured pixels
+  come from the standard Linux <i>XDG Desktop Portal</i>
+  (<code>org.freedesktop.portal.ScreenCast</code>) and the PipeWire media framework, the
+  same APIs used by OBS Studio, Discord screen share, and the built-in KDE/GNOME screenshot
+  tools.
 </p>
-<p>
-  The technology is equivalent to using OBS Studio, Discord screen share, or the
-  built-in KDE/GNOME screenshot tools, all of which are completely legitimate and do
-  not interfere with Tibia or BattlEye in any way.
-</p>
+<p><b>What we never do</b></p>
 <ul>
   <li>No memory reading or modification.</li>
   <li>No process or library injection.</li>
   <li>No API hooking.</li>
-  <li>No file-system access to the Tibia client.</li>
+  <li>No writing, modifying, or deleting any Tibia file.</li>
   <li>No network interaction with the game servers.</li>
-  <li>No input injection that reaches the game (Hunt Mode's passive key listener is observer-only).</li>
+  <li>No keystrokes, clicks, or any input sent to the Tibia window.</li>
+  <li>No observation of keys you press outside the app (no global key logger).</li>
+</ul>
+<p><b>What we do read, so the story matches the code</b></p>
+<ul>
+  <li>
+    <b>Screen pixels</b> of the window or region you explicitly picked in the portal prompt,
+    used for the mirror windows and (optionally) for the HUD panels.
+  </li>
+  <li>
+    <b>Tibia's <code>clientoptions.json</code></b> file, <i>read-only</i>, so the hotbar
+    panel can show the hotkeys <i>you</i> configured in Tibia and the app can notice when
+    you switch characters. We never write this file.
+  </li>
+  <li>
+    <b>The OS clipboard</b>, parsed only after <i>you</i> press Tibia's own "Copy to
+    clipboard" menu on the Hunt Analyser or Party Hunt widget. Hunt Mode must be ON for
+    this; when OFF the clipboard is ignored completely.
+  </li>
 </ul>
 <p>
-  That said, external software is <b>not officially supported</b> by CipSoft. Use at
-  your own risk; close this app before contacting Tibia support about client issues.
+  External software is <b>not officially supported</b> by CipSoft. Use at your own risk;
+  close this app before contacting Tibia support about client issues.
 </p>
 """
 
@@ -59,7 +73,7 @@ class AboutPage(QWidget):
 
         title = QLabel(f"{__app_name__}", c)
         title.setStyleSheet(
-            f"font-size: {TOKENS.type.size_display}pt; " f"font-weight: {TOKENS.type.weight_bold};"
+            f"font-size: {TOKENS.type.size_display}pt; font-weight: {TOKENS.type.weight_bold};"
         )
         layout.addWidget(title)
         layout.addWidget(QLabel(f"Version {__version__}", c))

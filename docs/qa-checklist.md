@@ -35,6 +35,60 @@ stable, KDE Plasma 6 on Wayland**. Where behavior is expected to differ on other
 - [ ] Border glow pulses at ~0.55 Hz (a full cycle every ~1.8 s).
 - [ ] Always-on-top holds across `Super+Tab` window switches.
 
+## 3b. Always-on-top vs. Tibia (layer-shell regression suite)
+
+The single most important promise of this app. On Plasma 6 Wayland the
+layer-shell overlay path kicks in; on GNOME / Mutter and X11 the
+reactive-re-raise path (focus-change handler + 1.5 s safety-net timer)
+handles the same problem less perfectly.
+
+- [ ] Start the app, add one mirror. Click the Tibia window. Mirror
+      stays visibly on top without any further interaction.
+- [ ] Toggle Tibia to true fullscreen (F11 or its in-game setting).
+      Mirror is still visible (layer-shell overlay layer). On
+      non-Plasma compositors, switch Tibia back to borderless-windowed
+      or use Companion view.
+- [ ] Alt-tab to a browser, then alt-tab back to Tibia. Mirror
+      returns to top within ~1.5 s (safety-net timer budget).
+- [ ] Add a second mirror while Tibia is focused. Both mirrors end
+      up on top; neither disappears behind Tibia.
+- [ ] Press `Delete` while the mirror is hovered/focused (unlocked).
+      The region is removed. (Regression guard: confirms keyboard
+      routing still works when the mirror is explicitly interactive.)
+- [ ] Unlock a mirror and drag it across the screen. Drag-to-move
+      still works. (Regression guard: `startSystemMove` still
+      functions despite the reactive re-raise trying to `raise_()`
+      the window.)
+
+## 3c. Click-through when locked (input-transparency regression suite)
+
+The second load-bearing promise: a locked mirror must NOT eat clicks or
+keystrokes intended for Tibia. On Wayland this relies on
+`WA_TransparentForMouseEvents` (which maps to
+`wl_surface.set_input_region(empty)`) plus, on the layer-shell path,
+`KeyboardInteractivity::None`.
+
+- [ ] Lock a mirror (right-click while unlocked -> "Lock", or
+      `Ctrl+Shift+L` globally). Move the mouse INSIDE the mirror's
+      rectangle and click. Tibia receives the click as if the mirror
+      weren't there (character walks, spell casts, whatever is
+      appropriate).
+- [ ] Drag-to-move Tibia's window across the screen STARTING from
+      inside a locked mirror. The drag passes through to Tibia's
+      title bar area. (On Wayland this is only meaningful if the
+      mirror overlaps Tibia's client area; the gesture itself is
+      what's being tested.)
+- [ ] While a locked mirror is visibly on top of Tibia, press
+      hotkeys that Tibia reads directly (function keys, spell
+      slots, WASD). Tibia receives every keystroke; the mirror's
+      `keyPressEvent` is never invoked.
+- [ ] `Ctrl+Shift+L` while all mirrors are locked unlocks all of
+      them (status bar confirms). Pressing it again re-locks all.
+- [ ] Unlock a mirror, right-click it. Context menu appears.
+      Click "Lock". Mirror immediately becomes click-through; the
+      next click in its area reaches Tibia. (No show/hide cycle
+      required -- the input region updates on the next commit.)
+
 ## 4. Profiles
 
 - [ ] "Save as..." creates a new profile and marks it bold in the profiles list.
@@ -93,7 +147,12 @@ stable, KDE Plasma 6 on Wayland**. Where behavior is expected to differ on other
 ## 10. Cross-desktop smoke
 
 - [ ] GNOME 46 Wayland: portal picker appears (Mutter backend); capture works with
-      slightly different stream metadata.
+      slightly different stream metadata. Mutter does NOT ship
+      `wlr-layer-shell-v1`; mirrors fall back to the reactive re-raise
+      path. For true-fullscreen Tibia there, switch to Companion view.
 - [ ] sway/Hyprland (wlroots): picker appears (wlr portal), capture works.
+      `wlr-layer-shell-v1` is supported, so mirrors sit above fullscreen.
 - [ ] Plasma X11 session: falls back through portal; may require
-      `xdg-desktop-portal-gtk` as a secondary. Document if so.
+      `xdg-desktop-portal-gtk` as a secondary. Document if so. Layer-shell
+      does not apply on X11; the reactive re-raise path handles
+      always-on-top.

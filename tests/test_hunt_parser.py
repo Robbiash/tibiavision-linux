@@ -155,3 +155,14 @@ def test_parse_party_hunt_rejects_solo_payload():
 def test_parse_party_hunt_returns_none_on_garbage():
     assert parse_party_hunt("") is None
     assert parse_party_hunt("not tibia") is None
+
+
+def test_parse_party_hunt_accepts_decorated_number_fields():
+    text = PARTY_PAYLOAD.replace(
+        "Balance: 21,279,710",
+        "Balance: 21,279,710 (5,319,927 each)",
+    ).replace("Balance: -426,000", "Balance: -426,000 gp")
+    session = parse_party_hunt(text)
+    assert session is not None
+    assert session.balance == 21_279_710
+    assert session.members[2].balance == -426_000

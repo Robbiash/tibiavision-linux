@@ -53,6 +53,10 @@ class ClipboardWatcher(QObject):
 
     hunt_captured = Signal(object, str)  # (HuntSession, raw_text)
     party_captured = Signal(object, str)  # (PartyHuntSession, raw_text)
+    # Fired when we see a clipboard string that looks like a Tibia Hunt
+    # payload, but Hunt Mode is OFF so we are (intentionally) ignoring it.
+    # Lets the UI show a one-time nudge explaining why nothing happened.
+    hunt_ignored_while_off = Signal()
 
     def __init__(
         self,
@@ -88,11 +92,12 @@ class ClipboardWatcher(QObject):
 
         Publishes at most one event per distinct payload: repeated copies
         of the same string are swallowed by the dedupe check. When a
-        :class:`HuntModeManager` is configured and currently inactive,
-        the method is a silent no-op.
+        :class:`HuntModeManager` is configured and currently inactive the
+        clipboard is otherwise ignored, but we still emit a
+        ``hunt_ignored_while_off`` signal if the payload looks like a
+        Tibia hunt dump. That lets the UI explain *why* the HUD did not
+        update, rather than silently swallowing the paste.
         """
-        if self._mode is not None and not self._mode.active:
-            return
         if not isinstance(text, str) or not text.strip():
             return
         if text == self._last_payload:
@@ -105,6 +110,13 @@ class ClipboardWatcher(QObject):
             # Not a Tibia payload. Don't clobber ``_last_payload`` here --
             # we still want to react if the user re-copies the same
             # non-matching text and then copies a Tibia payload.
+            return
+
+        if self._mode is not None and not self._mode.active:
+            # Hunt Mode gate. We deliberately do *not* update
+            # ``_last_payload`` here so the next copy after the user
+            # flips Hunt Mode on still triggers a fresh capture.
+            self.hunt_ignored_while_off.emit()
             return
 
         self._last_payload = text

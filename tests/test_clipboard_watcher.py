@@ -100,3 +100,43 @@ def test_clipboard_watcher_resumes_after_non_match(qapp):
     watcher.process_text("not tibia")
     watcher.process_text(SOLO)
     assert len(received) == 1
+
+
+class _FakeMode:
+    """Minimal HuntModeManager stand-in for gating tests."""
+
+    def __init__(self, active: bool = False) -> None:
+        self.active = active
+
+
+def test_clipboard_watcher_emits_ignored_signal_when_hunt_mode_off(qapp):
+    bus = AnalyzerHub()
+    received = _collect(bus, [EventKind.HUNT_STATS_UPDATE, EventKind.PARTY_HUNT_UPDATE])
+    mode = _FakeMode(active=False)
+    watcher = ClipboardWatcher(bus, clipboard=None, hunt_mode=mode)
+
+    ignored: list[int] = []
+    watcher.hunt_ignored_while_off.connect(lambda: ignored.append(1))
+
+    watcher.process_text(SOLO)
+
+    assert received == []
+    assert len(ignored) == 1
+
+    mode.active = True
+    watcher.process_text(SOLO)
+    assert len(received) == 1
+
+
+def test_clipboard_watcher_ignores_non_tibia_text_quietly_while_off(qapp):
+    bus = AnalyzerHub()
+    mode = _FakeMode(active=False)
+    watcher = ClipboardWatcher(bus, clipboard=None, hunt_mode=mode)
+
+    ignored: list[int] = []
+    watcher.hunt_ignored_while_off.connect(lambda: ignored.append(1))
+
+    watcher.process_text("just some random text")
+    watcher.process_text("")
+
+    assert ignored == []

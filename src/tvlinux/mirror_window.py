@@ -82,8 +82,16 @@ class MirrorWindow(QWidget):
         self._move_debounce.timeout.connect(self._emit_final_move)
         self._last_delta: QPoint = QPoint()
 
+        # Qt.Window is explicit here so the compositor treats the mirror as a
+        # real top-level surface. Without it, Tool + WindowStaysOnTopHint
+        # together sometimes lose their "always on top" promise on Wayland
+        # when another frameless/tool window (the FloatingRegionPicker) closes
+        # immediately above us -- Tibia would end up drawn on top of a freshly
+        # shown mirror. Pairing Window with Tool matches the picker's own
+        # flag set and keeps the stacking stable.
         flags = (
-            Qt.WindowType.FramelessWindowHint
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.NoDropShadowWindowHint
@@ -94,6 +102,16 @@ class MirrorWindow(QWidget):
         # background before paintEvent, which on NVIDIA + Wayland would otherwise
         # leave an opaque underlay that defeats per-pixel alpha.
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        # WA_ShowWithoutActivating stops show() / setWindowFlags()-triggered
+        # re-show from stealing active focus. On KDE Plasma 6 Wayland the
+        # focus-theft side effect is what frequently nudges KWin into restacking
+        # the freshly-shown mirror *below* an already-focused Tibia window,
+        # defeating WindowStaysOnTopHint. StrongFocus is retained deliberately:
+        # focus policy governs Qt-level key delivery (Delete/Backspace to
+        # :meth:`keyPressEvent`), not compositor stacking, so dropping it to
+        # NoFocus would silently kill the keyboard shortcut without helping
+        # Z-order at all.
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAutoFillBackground(False)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -105,6 +123,16 @@ class MirrorWindow(QWidget):
         else:
             self.setGeometry(region.geometry)
         self._last_pos = self.pos()
+
+        # Lock state drives input-transparency. On Wayland this is not
+        # optional: the compositor routes pointer events to whatever
+        # surface the cursor is over, and an overlay that accepts clicks
+        # will swallow them *before* they reach Tibia -- which on
+        # layer-shell is the most common failure mode we ship against
+        # (user tries to cast a spell through a mirror, Tibia sees
+        # nothing). See :meth:`_apply_input_transparency` for the full
+        # policy.
+        self._apply_input_transparency()
 
         self._glow_anim = QPropertyAnimation(self, b"glow_phase_prop", self)
         self._glow_anim.setStartValue(0.0)
@@ -135,6 +163,14 @@ class MirrorWindow(QWidget):
             self.setWindowFlags(flags)
             if was_visible:
                 self.show()
+        # Always re-apply input-transparency rather than diffing against
+        # ``prev.locked``. In practice the context menu flips the lock
+        # in-place on ``self._region`` before emitting ``region_updated``,
+        # which means ``prev is region`` by the time we get here and the
+        # naive ``prev.locked != region.locked`` comparison always
+        # reads False. setAttribute is idempotent so the unconditional
+        # call is free.
+        self._apply_input_transparency()
         if region.border_glow and self._glow_anim.state() != QPropertyAnimation.State.Running:
             self._glow_anim.start()
         elif not region.border_glow and self._glow_anim.state() == QPropertyAnimation.State.Running:
@@ -149,6 +185,59 @@ class MirrorWindow(QWidget):
         elif not region.visible and self.isVisible():
             self.hide()
         self.update()
+
+    def _apply_input_transparency(self) -> None:
+        """Flip the mirror between click-through and interactive.
+
+        This is what actually lets the user *play Tibia* while a mirror
+        is on top of it. On Wayland, pointer events are routed by the
+        compositor to whichever surface owns the input region at the
+        cursor position. A mirror that accepts clicks will swallow them
+        before they ever reach Tibia -- the user tries to cast a spell
+        through a spellbar mirror and nothing happens because the
+        compositor delivered the click to us and we silently dropped
+        it. Qt's ``WA_TransparentForMouseEvents`` on a top-level widget
+        translates to ``wl_surface.set_input_region(empty)`` on the
+        Wayland side, which tells the compositor "skip this surface
+        for pointer hit-testing, deliver to whatever's underneath"
+        (i.e., Tibia). This is the exact mechanism TibiaVision.com
+        describes as "strictly click-through"; it is also what
+        :class:`~tvlinux.smart_hud.SmartHud` already uses for the HUD.
+
+        Policy:
+
+        - ``region.locked`` -> click-through + no focus. The mirror is
+          purely visual. Play Tibia as if the mirror wasn't there.
+        - ``region.locked is False`` -> fully interactive. Drag from
+          anywhere, resize from the edges, right-click for the context
+          menu, Delete to remove. The mirror will block clicks to
+          Tibia while unlocked -- that's the point, the user is
+          editing it.
+
+        Toggling ``WA_TransparentForMouseEvents`` on a top-level
+        widget while it is mapped requires a reconfigure round-trip
+        on some compositors to re-commit the input region. Qt handles
+        that internally for us via ``QWindow::requestUpdate`` on
+        attribute change; no show/hide dance needed.
+        """
+        locked = self._region.locked
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, locked)
+        if locked:
+            # No keyboard focus either: the mirror shouldn't eat
+            # Delete/Backspace while the user is playing, and
+            # WindowStaysOnTopHint + layer-shell overlay already
+            # keep us visually on top without needing focus.
+            self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            # Give up any keyboard focus we might be holding right
+            # now. Otherwise the next keystroke (say, the user's
+            # next hotkey in Tibia) would still be routed to us
+            # until the compositor rebinds focus.
+            self.clearFocus()
+            # Reset cursor so a locked mirror doesn't leave behind a
+            # resize-arrow cursor shape that confuses the user.
+            self.unsetCursor()
+        else:
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def set_frame(self, image: QImage) -> None:
         """Called on every incoming capture frame."""

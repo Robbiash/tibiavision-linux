@@ -16,11 +16,14 @@ All the cross-object wiring lives here; individual modules stay unaware of each 
 
 from __future__ import annotations
 
+import contextlib
+import json
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
-from PySide6.QtCore import QObject, QPoint, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QImage
+from PySide6.QtCore import QObject, QPoint, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QGuiApplication, QIcon, QImage, QWindow
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -44,11 +47,14 @@ from .hud_panels import (
 )
 from .hunt_history import HuntHistoryStore, HuntRecord
 from .hunt_mode import HuntModeManager
+from .layer_shell import is_available as layer_shell_available
+from .layer_shell import promote_to_overlay as layer_shell_promote
 from .logging_config import get_logger
 from .mirror_window import MirrorWindow
+from .pages.settings_page import load_mirror_placement, load_mirror_safety_raise_enabled
 from .paths import triggers_path
 from .profiles import ProfileManager
-from .region_picker import RegionPickerDialog
+from .region_picker import FloatingRegionPicker
 from .regions import Region, RegionManager
 from .shell import ShellWindow
 from .shortcuts import GlobalShortcutManager, ShortcutSpec
@@ -77,7 +83,25 @@ class Application(QObject):
         self._mirrors: dict[UUID, MirrorWindow] = {}
         self._groups = MirrorGroupManager()
         self._last_frame: QImage | None = None
-        self._picker: RegionPickerDialog | None = None
+        self._picker: FloatingRegionPicker | None = None
+        # "floating" | "companion" | "both". Governs whether
+        # :class:`MirrorWindow` instances are actually shown on every
+        # incoming frame / region_added event. The CompanionPage receives
+        # frames unconditionally -- it's cheap, and the page is hidden
+        # until the user navigates to it anyway.
+        self._mirror_placement: str = load_mirror_placement()
+        # Region ids whose mirror should be raised above whatever the
+        # compositor promotes when the FloatingRegionPicker unmaps.
+        # Populated just before :meth:`RegionManager.add` so the
+        # :meth:`_create_mirror` slot can tell "just drawn via the
+        # picker" apart from "loaded from disk at startup".
+        self._pending_raise_ids: set[UUID] = set()
+        # Mirror ids that were successfully promoted to a wlr-layer-shell
+        # overlay surface. Those surfaces sit above fullscreen windows
+        # by protocol; the reactive re-raise and safety-net timer skip
+        # them (it's wasted work -- the compositor is already doing what
+        # we wanted).
+        self._layer_shell_promoted: set[UUID] = set()
 
         # Hunt Mode foundation. The app never interacts with Tibia: the
         # clipboard watcher and history auto-logger only react when the
@@ -90,6 +114,7 @@ class Application(QObject):
             hunt_mode=self._hunt_mode,
             audio_timers=self._audio,
             hunt_history=self._hunt_history,
+            hud_visible=True,
         )
         self._capture = CaptureCore(use_portal=use_portal, parent=self)
 
@@ -131,6 +156,7 @@ class Application(QObject):
         # opted in via ``auto_log_to_history`` (default: on). The store
         # writes to disk so the history survives restarts.
         self._clipboard_watcher.hunt_captured.connect(self._on_hunt_captured)
+        self._clipboard_watcher.hunt_ignored_while_off.connect(self._on_hunt_ignored_while_off)
 
         # Keep the tray checkbox in sync with the master Hunt Mode toggle.
         self._hunt_mode.toggled.connect(self._on_hunt_mode_toggled)
@@ -150,6 +176,33 @@ class Application(QObject):
         self._refresh_profiles_ui()
 
         apply_theme(QApplication.instance())
+
+        # Reactive "stay above Tibia" logic. KDE Plasma Wayland (and most
+        # other compositors) restacks the focused client on top when the
+        # user clicks into Tibia, burying our mirrors despite
+        # ``WindowStaysOnTopHint``. ``focusWindowChanged`` fires with
+        # ``None`` the instant our app loses focus -- that's the cue to
+        # push every visible mirror back up. ``applicationStateChanged``
+        # covers the alt-tab-back-in case. Both signals live on
+        # :class:`QGuiApplication`; ``.instance()`` is statically typed
+        # as ``QCoreApplication``, so we cast to the concrete subclass
+        # we actually constructed in ``__main__.main``.
+        gapp = cast(QGuiApplication, QGuiApplication.instance())
+        if gapp is not None:
+            gapp.focusWindowChanged.connect(self._on_focus_window_changed)
+            gapp.applicationStateChanged.connect(self._on_app_state_changed)
+
+        # Low-frequency safety-net. Catches compositor state drift the
+        # focus-change path misses (e.g. a fullscreen toggle that doesn't
+        # route through the normal focus handoff). Only fires while some
+        # *other* application holds focus, so it never interrupts user
+        # interaction with our own windows. See
+        # :func:`tvlinux.pages.settings_page.load_mirror_safety_raise_enabled`
+        # for the QSettings-backed off switch.
+        self._safety_raise_timer = QTimer(self)
+        self._safety_raise_timer.setInterval(1500)
+        self._safety_raise_timer.setTimerType(Qt.TimerType.CoarseTimer)
+        self._safety_raise_timer.timeout.connect(self._safety_raise_tick)
 
     # -- Wiring -----------------------------------------------------------------------
 
@@ -182,6 +235,9 @@ class Application(QObject):
         self._control.open_audio_timers_requested.connect(self._open_audio_timers)
         self._control.donate_requested.connect(self._show_donate)
         self._control.toggle_watch_mode_requested.connect(self._set_watch_mode)
+        self._control.hud_visibility_requested.connect(self._on_hud_visibility_from_settings)
+        self._control.open_hud_layout_editor_requested.connect(self._open_hud_layout_editor)
+        self._control.mirror_placement_changed.connect(self._on_mirror_placement_changed)
 
         # Region model -> mirrors
         self._regions.region_added.connect(self._create_mirror)
@@ -256,6 +312,8 @@ class Application(QObject):
         self._hud.show()
         self._capture.start()
         self._register_shortcuts()
+        if load_mirror_safety_raise_enabled():
+            self._safety_raise_timer.start()
 
     def _set_hud_visible(self, visible: bool) -> None:
         """Tray-menu toggle for the Smart HUD overlay."""
@@ -263,6 +321,31 @@ class Application(QObject):
             self._hud.show()
         else:
             self._hud.hide()
+        # Keep the Settings-page checkbox in sync with the tray menu.
+        self._control.set_hud_visible(visible)
+
+    def _on_hud_visibility_from_settings(self, visible: bool) -> None:
+        """Settings-page toggle for the Smart HUD overlay.
+
+        Also updates the tray-menu checkbox so both surfaces stay in sync.
+        """
+        if visible:
+            self._hud.show()
+        else:
+            self._hud.hide()
+        if hasattr(self, "_act_toggle_hud"):
+            self._act_toggle_hud.blockSignals(True)
+            self._act_toggle_hud.setChecked(visible)
+            self._act_toggle_hud.blockSignals(False)
+
+    def _open_hud_layout_editor(self) -> None:
+        """Spawn (or focus) the HUD layout editor companion window.
+
+        Delegates to :meth:`SmartHud.open_layout_editor`, which handles
+        idempotency and lifetime. We parent the editor to the main
+        shell so closing the app cleans it up automatically.
+        """
+        self._hud.open_layout_editor(parent=self._control)
 
     def _quit(self) -> None:
         self._profiles.save_to_disk()
@@ -278,9 +361,62 @@ class Application(QObject):
             f"{self._capture.source_size.height()}"
         )
 
+    # Rough heuristics that turn the lower-level capture error strings into
+    # plain-language recovery guidance for beginners. The technical message
+    # is still shown under "Details" so power users (and bug reports) keep
+    # the original text.
+    _CAPTURE_ERROR_HINTS: tuple[tuple[str, str, str], ...] = (
+        (
+            "portal",
+            "Your desktop didn't grant screen capture.",
+            "When the portal dialog appeared you may have cancelled or picked the "
+            "wrong window. Click the tray icon \u2192 \u201cReopen capture\u201d (or "
+            "restart the app) and choose the Tibia window in the picker.",
+        ),
+        (
+            "pipewiresrc",
+            "The PipeWire capture plugin is missing.",
+            "TibiaVision reads pixels through GStreamer's PipeWire plugin. On "
+            "Fedora / Bazzite install it with:\n\n"
+            "    sudo dnf install gstreamer1-plugin-pipewire\n\n"
+            "Then restart the app.",
+        ),
+        (
+            "gstreamer",
+            "GStreamer failed to start.",
+            "TibiaVision uses GStreamer to receive frames from the portal. Make "
+            "sure your desktop session is Wayland (or XWayland + KDE/GNOME) and "
+            "that GStreamer is installed, then restart the app.",
+        ),
+        (
+            "--no-portal",
+            "Screen capture is turned off.",
+            "You launched TibiaVision with the --no-portal flag, which disables "
+            "live capture. Quit the app and relaunch it without that flag.",
+        ),
+    )
+
     def _on_capture_error(self, msg: str) -> None:
         self._control.set_status(f"Capture error: {msg}")
-        QMessageBox.warning(self._control, "Capture error", msg)
+        title = "Screen capture stopped"
+        body = (
+            "TibiaVision couldn't receive frames from the portal. The HUD "
+            "and mirrors will stay frozen on the last image until capture "
+            "resumes."
+        )
+        lowered = msg.lower()
+        for needle, friendly_title, hint in self._CAPTURE_ERROR_HINTS:
+            if needle in lowered:
+                title = friendly_title
+                body = hint
+                break
+        box = QMessageBox(self._control)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(title)
+        box.setText(body)
+        box.setDetailedText(f"Technical details:\n{msg}")
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.exec()
 
     def _on_source_size_changed(self, _size) -> None:  # type: ignore[no-untyped-def]
         self._on_capture_started()
@@ -289,6 +425,10 @@ class Application(QObject):
         self._last_frame = image
         for mirror in self._mirrors.values():
             mirror.set_frame(image)
+        # Companion tiles always receive frames. The page is a normal
+        # tab in the shell stack; painting is cheap, and gating on
+        # visibility would cause tiles to flash-blank on first focus.
+        self._control.companion_page.set_frame(image)
         if self._picker is not None and self._picker.isVisible():
             self._picker.set_frame(image)
 
@@ -302,21 +442,46 @@ class Application(QObject):
                 "Wait for the capture session to start before adding regions.",
             )
             return
-        dlg = RegionPickerDialog(self._control)
-        self._picker = dlg
-        dlg.set_frame(self._last_frame)
-        try:
-            if dlg.exec() == RegionPickerDialog.DialogCode.Accepted:
-                rect = dlg.selected_rect()
-                if rect.isValid() and not rect.isEmpty():
-                    region = Region(
-                        name=f"Region {len(self._regions) + 1}",
-                        rect=rect,
-                    )
-                    self._regions.add(region)
-                    self._profiles.save_to_disk()
-        finally:
-            self._picker = None
+        # Re-entry: if a picker is already showing, bring it to the
+        # front rather than spawning a second one.
+        if self._picker is not None and self._picker.isVisible():
+            self._picker.raise_()
+            self._picker.activateWindow()
+            return
+
+        picker = FloatingRegionPicker(parent=None)
+        picker.set_frame(self._last_frame)
+        picker.size_to_source()
+        picker.region_accepted.connect(self._create_region_from_rect)
+        picker.cancelled.connect(self._clear_picker)
+        picker.destroyed.connect(lambda *_: self._clear_picker())
+        self._picker = picker
+        picker.show()
+
+    def _create_region_from_rect(self, rect: QRect) -> None:
+        """Persist a region captured from the floating picker.
+
+        Called with a source-stream rectangle; the picker closes itself
+        right after emitting the signal, so all we need to do is make
+        sure the region is valid and reach the same save path the old
+        modal dialog used.
+        """
+        if not rect.isValid() or rect.isEmpty():
+            return
+        region = Region(
+            name=f"Region {len(self._regions) + 1}",
+            rect=rect,
+        )
+        # Tag the id before emitting region_added so _create_mirror
+        # (direct signal connection, runs synchronously inside .add)
+        # knows to raise the new window above Tibia.
+        self._pending_raise_ids.add(region.id)
+        self._regions.add(region)
+        self._profiles.save_to_disk()
+
+    def _clear_picker(self) -> None:
+        """Drop our reference so the next Add region spawns a fresh picker."""
+        self._picker = None
 
     def _delete_region(self, region_id: UUID) -> None:
         self._regions.remove(region_id)
@@ -407,7 +572,7 @@ class Application(QObject):
         self._hunt_history.add(rec)
         self._control.hunt_history_page.refresh()
         self._control.set_status(
-            f"Captured hunt: profit {rec.balance} gp " f"({rec.session_sec // 60}m session)"
+            f"Captured hunt: profit {rec.balance} gp ({rec.session_sec // 60}m session)"
         )
 
     def _on_hunt_mode_toggled(self, active: bool) -> None:
@@ -415,7 +580,45 @@ class Application(QObject):
         if hasattr(self, "_act_hunt_mode"):
             self._act_hunt_mode.setChecked(active)
 
+    def _on_hunt_ignored_while_off(self) -> None:
+        """Show a friendly nudge when a Tibia paste arrived but Hunt Mode is off.
+
+        Writes to the status-footer label instead of popping a dialog, so
+        the hint is visible but non-intrusive. Tray notification is used
+        only when the main window is hidden, so a user who has the window
+        minimised still gets the feedback.
+        """
+        msg = "Clipboard ignored: Hunt Mode is OFF. Toggle it on to capture hunts."
+        self._control.set_status(msg)
+        if hasattr(self, "_tray") and not self._control.isVisible():
+            # Some desktops silently reject tray notifications; never crash
+            # on a best-effort nudge.
+            with contextlib.suppress(Exception):
+                self._tray.showMessage(
+                    "Hunt Mode is OFF",
+                    "TibiaVision saw a Tibia clipboard copy but ignored it "
+                    "because Hunt Mode is currently off.",
+                    msecs=4000,
+                )
+
     # -- Mirror lifecycle -------------------------------------------------------------
+
+    def _floating_mirrors_enabled(self) -> bool:
+        """Should freshly-spawned mirrors actually appear on screen?"""
+        return self._mirror_placement in {"floating", "both"}
+
+    def _on_mirror_placement_changed(self, mode: str) -> None:
+        """React to the Settings dropdown: show/hide all floating mirrors in place."""
+        self._mirror_placement = mode
+        show = self._floating_mirrors_enabled()
+        for region_id, mirror in self._mirrors.items():
+            region = self._regions.get(region_id)
+            if region is None:
+                continue
+            if show and region.visible and not mirror.isVisible():
+                mirror.show()
+            elif not show and mirror.isVisible():
+                mirror.hide()
 
     def _create_mirror(self, region: Region) -> None:
         if region.id in self._mirrors:
@@ -427,16 +630,164 @@ class Application(QObject):
         mirror.moved.connect(self._on_mirror_moved)
         mirror.unlink_requested.connect(self._on_unlink_requested)
         self._mirrors[region.id] = mirror
-        if region.visible:
+        # In "companion"-only mode the mirror exists (so we keep the same
+        # signal wiring + cheap set_frame path) but never shows itself.
+        if region.visible and self._floating_mirrors_enabled():
+            # Try to promote to a wlr-layer-shell overlay BEFORE the
+            # first show(). The surface role is committed on the first
+            # commit; once committed it's permanent, so late-binding
+            # is not an option. Promotion is a no-op on non-Wayland
+            # sessions or where the library isn't loadable, in which
+            # case we fall through to the reactive re-raise path.
+            promoted = False
+            if layer_shell_available():
+                promoted = layer_shell_promote(mirror)
+                if promoted:
+                    self._layer_shell_promoted.add(region.id)
+                    log.info("mirror.layer_shell_promoted", region_id=str(region.id))
+                else:
+                    log.warning("mirror.layer_shell_promotion_failed", region_id=str(region.id))
+            else:
+                log.debug("mirror.layer_shell_unavailable_fallback_to_reraise")
             mirror.show()
+            # Only run the 3-stage raise on surfaces that need it.
+            # Layer-shell overlays outrank fullscreen windows by design;
+            # raising them is cosmetic at best and potentially steals a
+            # frame from another overlay app (notifications, etc.).
+            if not promoted and region.id in self._pending_raise_ids:
+                self._raise_mirror_above_game(region.id)
         if self._last_frame is not None:
             mirror.set_frame(self._last_frame)
+
+    def _reraise_sequence(self, mirror: MirrorWindow) -> None:
+        """Run the three-stage raise dance on a single mirror.
+
+        Fires immediately, on the next event-loop turn, and again after
+        250 ms. The staggered retries cover compositors (Mutter on NVIDIA
+        in particular) that defer focus/stacking a frame or two, as well
+        as the KWin-on-Plasma case where a freshly-focused Tibia briefly
+        wins the Z-order before the compositor applies our `_NET_WM_STATE_ABOVE`
+        hint.
+
+        ``mirror`` is captured by value into the deferred closures so
+        that a regions reset or delete between stages can't raise a
+        now-destroyed widget: each closure re-checks ``id(mirror) in
+        self._mirrors.values()`` via the id -> mirror mapping by id()
+        lookup... in practice we just guard on ``isVisible()`` and the
+        weak-ish "still owned by us" check of ``mirror in self._mirrors.values()``.
+        """
+        if mirror is None:
+            return
+        mirror.raise_()
+        mirror.activateWindow()
+
+        def _still_live() -> MirrorWindow | None:
+            # Re-fetch by identity so we never touch a mirror the region
+            # manager has since torn down. O(N) is fine: N is dozens at most.
+            for m in self._mirrors.values():
+                if m is mirror:
+                    return m if m.isVisible() else None
+            return None
+
+        def _reraise() -> None:
+            m = _still_live()
+            if m is None:
+                return
+            m.raise_()
+            m.activateWindow()
+
+        QTimer.singleShot(0, _reraise)
+
+        def _final() -> None:
+            m = _still_live()
+            if m is not None:
+                m.raise_()
+                m.activateWindow()
+
+        QTimer.singleShot(250, _final)
+
+    def _raise_mirror_above_game(self, region_id: UUID) -> None:
+        """Re-assert a freshly-spawned mirror above the game window.
+
+        Wayland hands focus to the next valid surface when the
+        always-on-top :class:`FloatingRegionPicker` closes; on many
+        compositors that lands on Tibia, which would otherwise draw
+        on top of the brand new mirror.
+        """
+        mirror = self._mirrors.get(region_id)
+        if mirror is None:
+            self._pending_raise_ids.discard(region_id)
+            return
+        self._reraise_sequence(mirror)
+        # Clear the picker-set pending flag at the tail of the same
+        # 250 ms window ``_reraise_sequence`` uses, so the bookkeeping
+        # stays in lockstep with the old API contract exercised by
+        # ``tests.test_mirror_raise``.
+        QTimer.singleShot(250, lambda: self._pending_raise_ids.discard(region_id))
+
+    def _raise_all_mirrors(self) -> None:
+        """Run the three-stage raise on every visible mirror.
+
+        Hooked up to ``QGuiApplication.focusWindowChanged`` (fires when
+        focus leaves all of our surfaces, typically because the user
+        clicked into Tibia) and ``applicationStateChanged`` (fires when
+        we regain ``ApplicationActive`` after an alt-tab round-trip).
+
+        Mirrors promoted to a wlr-layer-shell overlay surface are
+        skipped: the protocol already guarantees they sit above all
+        xdg-shell windows including fullscreen ones, and raising /
+        activating a layer-shell surface is a protocol-level no-op in
+        most compositors.
+        """
+        for rid, mirror in self._mirrors.items():
+            if rid in self._layer_shell_promoted:
+                continue
+            if mirror.isVisible():
+                self._reraise_sequence(mirror)
+
+    def _on_focus_window_changed(self, window: QWindow | None) -> None:
+        """Re-raise mirrors when focus moves outside our app.
+
+        Qt reports ``None`` when no window in *our process* holds focus.
+        On KDE Plasma Wayland this is how we find out that the user just
+        clicked the Tibia window: focus leaves our surfaces, the
+        compositor promotes Tibia on top, and unless we push our mirrors
+        back above it right now they stay buried until the user clicks
+        one of our windows again.
+        """
+        if window is not None:
+            # Focus stayed inside our app (control panel, a mirror, the
+            # picker, etc.). Nothing to do.
+            return
+        self._raise_all_mirrors()
+
+    def _on_app_state_changed(self, state: Qt.ApplicationState) -> None:
+        if state == Qt.ApplicationState.ApplicationActive:
+            self._raise_all_mirrors()
+
+    def _safety_raise_tick(self) -> None:
+        """Periodic safety-net: re-raise mirrors when another app has focus.
+
+        Only fires while ``QApplication.activeWindow()`` is ``None``
+        (i.e., focus is on some other app, typically Tibia). Skipped
+        while the user is interacting with any of our own windows so we
+        never disrupt their drag/resize/menu gestures.
+        """
+        if QApplication.activeWindow() is not None:
+            return
+        for rid, mirror in self._mirrors.items():
+            if rid in self._layer_shell_promoted:
+                continue
+            if mirror.isVisible():
+                mirror.raise_()
 
     def _destroy_mirror(self, region_id: UUID) -> None:
         mirror = self._mirrors.pop(region_id, None)
         if mirror is not None:
             mirror.close()
             mirror.deleteLater()
+        self._pending_raise_ids.discard(region_id)
+        self._layer_shell_promoted.discard(region_id)
         self._groups.forget(region_id)
         self._refresh_peer_flags()
 
@@ -446,6 +797,11 @@ class Application(QObject):
             self._create_mirror(region)
             return
         mirror.set_region(region)
+        # set_region honours region.visible on its own, which would
+        # re-show a mirror we intentionally hid while in companion-only
+        # mode. Re-assert the placement policy here.
+        if not self._floating_mirrors_enabled() and mirror.isVisible():
+            mirror.hide()
 
     def _rebuild_mirrors(self, regions: list[Region]) -> None:
         for rid in list(self._mirrors.keys()):
@@ -513,8 +869,37 @@ class Application(QObject):
         self._control.set_profiles(self._profiles.names(), self._profiles.active)
 
     def _save_profile(self, name: str) -> None:
-        self._profiles.save_profile_as(name)
+        # Prevent silent overwrites. Re-saving the active profile keeps the
+        # existing "save" shortcut semantics; saving over a *different*
+        # existing profile asks for confirmation first.
+        existing = set(self._profiles.names())
+        if name in existing and name != self._profiles.active:
+            box = QMessageBox(self._control)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Overwrite profile?")
+            box.setText(f"Profile \u201c{name}\u201d already exists.")
+            box.setInformativeText(
+                "Saving will replace its saved regions with your current setup. "
+                "This cannot be undone."
+            )
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if box.exec() != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            self._profiles.save_profile_as(name)
+        except OSError as e:
+            QMessageBox.critical(
+                self._control,
+                "Couldn't save profile",
+                f"Saving the profile failed:\n\n{e}\n\n"
+                "Check that the config folder is writable and try again.",
+            )
+            return
         self._refresh_profiles_ui()
+        self._control.set_status(f"Saved profile '{name}'.")
 
     def _load_profile(self, name: str) -> None:
         self._profiles.load_profile(name)
@@ -531,10 +916,41 @@ class Application(QObject):
         path, _ = QFileDialog.getOpenFileName(
             self._control, "Import profile", "", "Profile JSON (*.json)"
         )
-        if path:
+        if not path:
+            return
+        try:
             new_name = self._profiles.import_from(Path(path))
-            self._refresh_profiles_ui()
-            self._control.set_status(f"Imported profile '{new_name}'.")
+        except FileNotFoundError:
+            QMessageBox.warning(
+                self._control,
+                "File not found",
+                "That profile file no longer exists. Pick another one and try again.",
+            )
+            return
+        except json.JSONDecodeError as e:
+            QMessageBox.warning(
+                self._control,
+                "Couldn't read that profile",
+                "The file isn't a valid profile export.\n\n"
+                f"Details: {e.msg} (line {e.lineno}, column {e.colno})",
+            )
+            return
+        except (OSError, UnicodeDecodeError) as e:
+            QMessageBox.critical(
+                self._control,
+                "Couldn't read that profile",
+                f"Reading the profile failed:\n\n{e}",
+            )
+            return
+        except (KeyError, ValueError, TypeError) as e:
+            QMessageBox.warning(
+                self._control,
+                "Profile file looks broken",
+                f"That file doesn't look like a TibiaVision profile export.\n\nDetails: {e}",
+            )
+            return
+        self._refresh_profiles_ui()
+        self._control.set_status(f"Imported profile '{new_name}'.")
 
     def _export_profile(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -543,9 +959,19 @@ class Application(QObject):
             f"{self._profiles.active}.json",
             "Profile JSON (*.json)",
         )
-        if path:
+        if not path:
+            return
+        try:
             self._profiles.export_current_to(Path(path))
-            self._control.set_status(f"Exported profile '{self._profiles.active}'.")
+        except OSError as e:
+            QMessageBox.critical(
+                self._control,
+                "Couldn't save that file",
+                f"Exporting the profile failed:\n\n{e}\n\n"
+                "Pick a folder you have permission to write to and try again.",
+            )
+            return
+        self._control.set_status(f"Exported profile '{self._profiles.active}'.")
 
     def _cycle_profile(self) -> None:
         target = self._profiles.next_profile()
@@ -580,6 +1006,14 @@ class Application(QObject):
                 description="TibiaVision-Linux: show all mirror windows",
                 default_trigger="CTRL+SHIFT+s",
             ),
+            ShortcutSpec(
+                id="toggle_lock_all",
+                description=(
+                    "TibiaVision-Linux: lock/unlock all mirror windows "
+                    "(locked mirrors are click-through so Tibia receives input)"
+                ),
+                default_trigger="CTRL+SHIFT+l",
+            ),
         ]
         for slot in range(10):
             shortcuts.append(
@@ -592,9 +1026,28 @@ class Application(QObject):
         self._shortcuts.register_handler("cycle_profile", self._cycle_profile)
         self._shortcuts.register_handler("hide_all", lambda: self._regions.set_all_visible(False))
         self._shortcuts.register_handler("show_all", lambda: self._regions.set_all_visible(True))
+        self._shortcuts.register_handler("toggle_lock_all", self._toggle_lock_all)
         for slot in range(10):
             self._shortcuts.register_handler(f"audio_start_{slot}", self._make_audio_starter(slot))
         self._shortcuts.start(shortcuts)
+
+    def _toggle_lock_all(self) -> None:
+        """Global shortcut handler: flip every region's lock state.
+
+        Lets the user switch between "playing" (all mirrors locked /
+        click-through, Tibia gets every click and keypress) and
+        "editing" (all mirrors interactive, can be dragged and
+        resized) from anywhere, even while Tibia has keyboard focus.
+        The policy is "if any mirror is currently unlocked, lock them
+        all"; the inverse direction unlocks them. This matches the
+        most common mental model -- "am I in edit mode or not?" --
+        and means the shortcut is self-correcting: one press is
+        always enough to reach a clean state.
+        """
+        any_unlocked = any(not r.locked for r in self._regions)
+        self._regions.set_all_locked(any_unlocked)
+        state = "locked (click-through)" if any_unlocked else "unlocked (editable)"
+        self._control.set_status(f"All regions {state}.")
 
     def _make_audio_starter(self, slot: int):  # type: ignore[no-untyped-def]
         def _handler() -> None:

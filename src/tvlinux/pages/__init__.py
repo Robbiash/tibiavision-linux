@@ -7,6 +7,7 @@ shell owns the navigation, page header, and status footer.
 
 from .about_page import AboutPage
 from .audio_timers_page import AudioTimersPage
+from .companion_page import CompanionPage
 from .hunt_history_page import HuntHistoryPage
 from .regions_page import RegionsPage
 from .settings_page import SettingsPage
@@ -14,6 +15,7 @@ from .settings_page import SettingsPage
 __all__ = [
     "AboutPage",
     "AudioTimersPage",
+    "CompanionPage",
     "HuntHistoryPage",
     "RegionsPage",
     "SettingsPage",

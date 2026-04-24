@@ -24,32 +24,42 @@ _STATEMENT = """
 
 <p><b>Official Statement</b></p>
 <p>
-  TibiaVision-Linux is a <i>passive</i>, read-only screen-mirroring utility. It enhances
-  your display setup without any interaction with the Tibia game client, BattlEye
-  anti-cheat system, or game servers. It operates using only the standard Linux
-  <i>XDG Desktop Portal</i> (<code>org.freedesktop.portal.ScreenCast</code>) and the
-  PipeWire media framework already shipped with Bazzite, Fedora, and every modern
-  Linux desktop.
+  TibiaVision-Linux is a <i>passive</i>, read-only utility. It never sends input to Tibia,
+  never touches Tibia's memory or network, and never writes any Tibia file. Captured pixels
+  come from the standard Linux <i>XDG Desktop Portal</i>
+  (<code>org.freedesktop.portal.ScreenCast</code>) and the PipeWire media framework, the
+  same APIs used by OBS Studio, Discord screen share, and the built-in KDE/GNOME screenshot
+  tools.
 </p>
 
-<p>
-  The technology is equivalent to using OBS Studio, Discord screen share, or the
-  built-in KDE/GNOME screenshot tools, all of which are completely legitimate and do
-  not interfere with Tibia or BattlEye in any way.
-</p>
-
+<p><b>What we never do</b></p>
 <ul>
   <li>No memory reading or modification.</li>
   <li>No process or library injection.</li>
   <li>No API hooking.</li>
-  <li>No file-system access to the Tibia client.</li>
+  <li>No writing, modifying, or deleting any Tibia file.</li>
   <li>No network interaction with the game servers.</li>
-  <li>No input injection or automation of any kind.</li>
+  <li>No keystrokes, clicks, or any input sent to the Tibia window.</li>
+  <li>No observation of keys you press outside the app.</li>
+</ul>
+
+<p><b>What we do read</b></p>
+<ul>
+  <li>Screen pixels of the window you picked in the portal prompt.</li>
+  <li>
+    Tibia's <code>clientoptions.json</code>, <i>read-only</i>, to show the hotkeys you
+    already bound in Tibia and to notice when you switch characters.
+  </li>
+  <li>
+    The OS clipboard - only after <i>you</i> press Tibia's own
+    "Copy to clipboard" on the Hunt Analyser or Party Hunt widget, and only while Hunt Mode
+    is ON.
+  </li>
 </ul>
 
 <p>
-  That said, external software is <b>not officially supported</b> by CipSoft. Use at
-  your own risk; close this app before contacting Tibia support about client issues.
+  External software is <b>not officially supported</b> by CipSoft. Use at your own risk;
+  close this app before contacting Tibia support about client issues.
 </p>
 """
 

@@ -106,7 +106,9 @@ def test_party_count_empty_session():
 
 
 def test_live_extrapolate_advances_from_capture_time():
-    s = _session(duration=timedelta(hours=1), xp_gain=1_000_000, balance=600_000, captured_at=1_000.0)
+    s = _session(
+        duration=timedelta(hours=1), xp_gain=1_000_000, balance=600_000, captured_at=1_000.0
+    )
     # 30 minutes after capture: total session time should be 1h30m.
     ms_live, xp_live, profit_live = live_extrapolate(s, now_monotonic=1_000.0 + 1_800.0)
     assert ms_live == 5_400_000.0  # 90 minutes in ms

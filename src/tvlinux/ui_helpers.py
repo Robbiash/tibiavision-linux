@@ -8,6 +8,7 @@ every feature automatically.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from importlib import resources
 from pathlib import Path
 
@@ -126,6 +127,12 @@ def swatch_button(
     btn.setProperty("variant", "swatch")
     btn.setFixedSize(size, size)
     btn.setToolTip(tooltip)
+    # Icon-only: mirror the tooltip to the accessibility tree so
+    # screen readers announce the preset name and Tab can reach the
+    # button.
+    btn.setAccessibleName(tooltip)
+    btn.setAccessibleDescription(f"Set border color to {tooltip.lower()}")
+    btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     # Background color must be inline (per-instance), border / radius come
     # from the QSS swatch variant.
@@ -142,6 +149,8 @@ def color_picker_button(parent: QWidget | None = None) -> QPushButton:
     btn.setMinimumWidth(88)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     btn.setToolTip("Pick custom border color")
+    btn.setAccessibleName("Pick custom border color")
+    btn.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     return btn
 
 
@@ -307,3 +316,105 @@ class CollapsibleCard(QFrame):
 
     def is_expanded(self) -> bool:
         return self._expanded
+
+
+# -- Empty state -------------------------------------------------------------
+
+
+class EmptyState(QFrame):
+    """Centred first-run / "nothing yet" widget with an optional CTA.
+
+    Used in place of a bare muted label when a page can be entered with
+    zero content (Regions, Hunt History, Audio Timers). The framing
+    matters: a crisp illustration-like glyph + a clear primary action
+    is the difference between "broken" and "I know what to do next"
+    for a first-time user.
+
+    ``icon_name`` resolves via :func:`icon`; the glyph falls back to a
+    simple bullet if the asset is missing so the layout still renders.
+    """
+
+    action_clicked = Signal()
+
+    def __init__(
+        self,
+        *,
+        icon_name: str,
+        title: str,
+        subtitle: str,
+        action_label: str | None = None,
+        on_action: Callable[[], None] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("EmptyState")
+        s = TOKENS.spacing
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(s.xl, s.xl, s.xl, s.xl)
+        outer.setSpacing(s.md)
+        outer.addStretch(1)
+
+        glyph = QLabel(self)
+        glyph.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        glyph.setPixmap(icon(icon_name).pixmap(QSize(48, 48)))
+        # If the icon is missing, setPixmap receives a null pixmap and
+        # the label renders empty; fall back to a soft bullet so the
+        # visual hierarchy still has an anchor point at the top.
+        if glyph.pixmap().isNull():
+            glyph.setText("\u25cb")
+            glyph.setStyleSheet(
+                f"color: {TOKENS.palette.text_muted};"
+                f" font-size: 36pt;"
+                f" font-weight: {TOKENS.type.weight_bold};"
+            )
+        outer.addWidget(glyph, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        heading = QLabel(title, self)
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setStyleSheet(
+            f"font-size: {TOKENS.type.size_heading + 2}pt;"
+            f" font-weight: {TOKENS.type.weight_bold};"
+            f" color: {TOKENS.palette.text_primary};"
+        )
+        outer.addWidget(heading)
+
+        caption = QLabel(subtitle, self)
+        caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        caption.setWordWrap(True)
+        caption.setProperty("role", "muted")
+        outer.addWidget(caption)
+
+        if action_label is not None:
+            btn_row = QHBoxLayout()
+            btn_row.addStretch(1)
+            btn = pill_button(action_label, variant="primary", parent=self)
+            btn.clicked.connect(self.action_clicked.emit)
+            if on_action is not None:
+                self.action_clicked.connect(on_action)
+            btn_row.addWidget(btn)
+            btn_row.addStretch(1)
+            outer.addSpacing(s.xs)
+            outer.addLayout(btn_row)
+
+        outer.addStretch(1)
+
+
+def empty_state(
+    *,
+    icon_name: str,
+    title: str,
+    subtitle: str,
+    action_label: str | None = None,
+    on_action: Callable[[], None] | None = None,
+    parent: QWidget | None = None,
+) -> EmptyState:
+    """Factory for :class:`EmptyState`. Prefer this over constructing directly."""
+    return EmptyState(
+        icon_name=icon_name,
+        title=title,
+        subtitle=subtitle,
+        action_label=action_label,
+        on_action=on_action,
+        parent=parent,
+    )
