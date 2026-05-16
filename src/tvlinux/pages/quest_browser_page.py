@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -15,12 +17,10 @@ from PySide6.QtWidgets import (
 from ..tibia_reborn_server import TibiaRebornServer
 from ..ui_helpers import muted_label
 
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-
-    _WEB_ENGINE_AVAILABLE = True
-except ImportError:
-    _WEB_ENGINE_AVAILABLE = False
+# Deliberately NOT importing QtWebEngineWidgets at module level:
+# the import alone spawns the Chromium subsystem, and on a broken
+# GPU stack inside distrobox that crash propagates to the whole Qt
+# compositor and blanks ShellWindow. Defer until showEvent.
 
 __all__ = ["QuestBrowserPage"]
 
@@ -32,33 +32,49 @@ class QuestBrowserPage(QWidget):
         super().__init__(parent)
         self._server = server
         self._started = False
+        self._view: Any | None = None
+        self._web_engine_unavailable = False
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        if not _WEB_ENGINE_AVAILABLE:
-            layout.addWidget(self._build_unavailable_state())
-            return
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
 
         # Status bar at the top (hidden once loaded)
         self._status_bar = self._build_status_bar()
-        layout.addWidget(self._status_bar)
+        self._layout.addWidget(self._status_bar)
 
-        # Stacked: loading placeholder vs live web view
+        # Stacked: loading placeholder vs live web view (view added lazily)
         self._stack = QStackedWidget(self)
         self._placeholder = self._build_placeholder()
         self._stack.addWidget(self._placeholder)
-
-        self._view = QWebEngineView(self)
-        self._view.setUrl(QUrl("about:blank"))
-        self._stack.addWidget(self._view)
-
-        layout.addWidget(self._stack, 1)
+        self._layout.addWidget(self._stack, 1)
 
         # Wire server signals
         server.ready.connect(self._on_server_ready)
         server.failed.connect(self._on_server_failed)
+
+    def _ensure_view(self) -> bool:
+        """Lazily build the QWebEngineView. Returns False if WebEngine isn't usable."""
+        if self._view is not None:
+            return True
+        if self._web_engine_unavailable:
+            return False
+        try:
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+        except ImportError:
+            self._web_engine_unavailable = True
+            self._show_unavailable()
+            return False
+        self._view = QWebEngineView(self)
+        self._view.setUrl(QUrl("about:blank"))
+        self._stack.addWidget(self._view)
+        return True
+
+    def _show_unavailable(self) -> None:
+        unavailable = self._build_unavailable_state()
+        self._stack.addWidget(unavailable)
+        self._stack.setCurrentWidget(unavailable)
+        self._status_label.setText("Quest Browser unavailable")
 
     # -- UI builders ----------------------------------------------------------
 
@@ -120,7 +136,7 @@ class QuestBrowserPage(QWidget):
         title.setStyleSheet("font-size: 14pt; font-weight: bold;")
         col.addWidget(title)
         sub = muted_label(
-            "PySide6-WebEngine is not installed.\n" "Run: pip install PySide6-WebEngine",
+            "PySide6-WebEngine is not installed.\nRun: pip install PySide6-WebEngine",
             w,
         )
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -130,9 +146,12 @@ class QuestBrowserPage(QWidget):
     # -- Server signal handlers -----------------------------------------------
 
     def _on_server_ready(self) -> None:
+        if not self._ensure_view():
+            return
         self._status_label.setText(f"Quest browser — {self._server.url}")
         self._reload_btn.show()
         self._open_btn.show()
+        assert self._view is not None
         self._view.setUrl(QUrl(self._server.url))
         self._stack.setCurrentWidget(self._view)
 
@@ -146,7 +165,7 @@ class QuestBrowserPage(QWidget):
     # -- Button handlers -------------------------------------------------------
 
     def _reload(self) -> None:
-        if _WEB_ENGINE_AVAILABLE and hasattr(self, "_view"):
+        if self._view is not None:
             self._view.reload()
 
     def _open_external(self) -> None:

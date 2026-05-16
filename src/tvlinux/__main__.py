@@ -117,11 +117,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # QtWebEngine (Chromium) needs GPU disabled + sandbox off inside
     # containerised environments (distrobox, flatpak, Docker). Without
-    # this the renderer process crashes on startup and blacks out the
-    # whole Qt window. Only set if not already overridden by the user.
+    # --disable-gpu the renderer crashes on the host GPU stack; without
+    # --no-sandbox Chromium's namespace sandbox fights the container's
+    # own sandbox. We INTENTIONALLY leave SwiftShader enabled so
+    # Chromium has a software rasterizer to fall back to; passing
+    # --disable-software-rasterizer alongside --disable-gpu leaves the
+    # renderer with no rasterizer at all and the whole compositor goes
+    # black. setdefault so users can still override manually.
     os.environ.setdefault(
         "QTWEBENGINE_CHROMIUM_FLAGS",
-        "--no-sandbox --disable-gpu --disable-software-rasterizer",
+        "--no-sandbox --disable-gpu",
     )
 
     # Import Qt lazily so --version / --help don't pay the startup cost,
