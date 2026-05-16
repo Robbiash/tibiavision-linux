@@ -6,6 +6,7 @@ import html
 import os
 import re
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from .discord_layer import DiscordLayerError, DiscordVoiceLayer, parse_channel_i
 from .memory import MemoryFact, MemoryStore
 from .persona import build_system_prompt
 from .quest_oracle import QuestMatch, QuestOracle
+from .system_audio import SystemAudioListener
 from .voice import LocalSpeaker, WhisperTranscriber, stt_model_from_env
 
 __all__ = ["AssistantWindow"]
@@ -115,7 +117,19 @@ class AssistantWindow(QMainWindow):
         self._speaker = LocalSpeaker(self)
         self._transcriber = WhisperTranscriber(model_size=stt_model_from_env())
         self._discord = DiscordVoiceLayer(self)
+        # Two parallel listeners: monitor catches the call audio (everyone
+        # except the user — Discord doesn't echo user's own mic back), mic
+        # catches the user's own voice. Together they cover the whole call.
+        self._sysaudio = SystemAudioListener(self, device="@DEFAULT_MONITOR@", source_label="call")
+        self._sysaudio_mic = SystemAudioListener(self, device="@DEFAULT_SOURCE@", source_label="me")
         self._pending_discord_inputs: list[tuple[str, str]] = []
+        # Hard cooldown after the bot's TTS finishes so trailing Whisper
+        # results (from chunks that were in-flight when the TTS pause
+        # kicked in) can't trigger a fresh response. Without this we
+        # spiral: she TTSes → leftover transcript arrives → Grok →
+        # more TTS → forever.
+        self._sysaudio_cooldown_until = 0.0
+        self._sysaudio_post_tts_cooldown_s = 5.0
         self._oracle = QuestOracle()
         self._active_quest: QuestMatch | None = None
 
@@ -197,6 +211,24 @@ class AssistantWindow(QMainWindow):
         discord_options.addWidget(self._discord_require_wake)
         discord_options.addStretch(1)
         layout.addRow("", _layout_host(discord_options, box))
+
+        # System-audio capture row (alternative listening source — captures
+        # whatever the user hears in their headphones, so it picks up every
+        # speaker in the Discord call without relying on Discord's broken
+        # voice-receive API).
+        sysaudio_row = QHBoxLayout()
+        sysaudio_row.setContentsMargins(0, 0, 0, 0)
+        sysaudio_row.setSpacing(8)
+        self._sysaudio_listen = QCheckBox("Listen to system audio (headphones required)", box)
+        self._sysaudio_listen.setChecked(False)
+        self._sysaudio_listen.setToolTip(
+            "Capture audio from your default output's PipeWire monitor. "
+            "Picks up everyone in your Discord call. You MUST be on headphones — "
+            "with speakers, the bot's TTS would feed back into your microphone."
+        )
+        sysaudio_row.addWidget(self._sysaudio_listen)
+        sysaudio_row.addStretch(1)
+        layout.addRow("", _layout_host(sysaudio_row, box))
 
         self._discord_wake_word = QLineEdit(box)
         self._discord_wake_word.setPlaceholderText("svetlana")
@@ -329,6 +361,24 @@ class AssistantWindow(QMainWindow):
         self._discord.status_changed.connect(self._on_discord_status_changed)
         self._discord.joined_changed.connect(self._on_discord_joined_changed)
         self._discord.heard_text.connect(self._on_discord_heard_text)
+        self._sysaudio_listen.toggled.connect(self._on_sysaudio_listen_toggled)
+        # Reuse the Discord status channel for system-audio messages too —
+        # the AssistantWindow only has one status area and "[14:30] System: ..."
+        # is the right surface for either source.
+        self._sysaudio.status_changed.connect(self._on_discord_status_changed)
+        self._sysaudio.heard_text.connect(self._on_sysaudio_heard_text)
+        self._sysaudio_mic.status_changed.connect(self._on_discord_status_changed)
+        self._sysaudio_mic.heard_text.connect(self._on_sysaudio_heard_text)
+        # Pause both capture sources while the bot is talking. Monitor
+        # would loop her TTS back in; mic doesn't loop but pausing during
+        # TTS keeps response handling strictly turn-based for MVP. We'll
+        # revisit when we add interruption / barge-in support.
+        self._discord.tts_busy_changed.connect(self._sysaudio.set_paused)
+        self._discord.tts_busy_changed.connect(self._sysaudio_mic.set_paused)
+        # Also bump a cooldown timestamp when TTS ends — chunks that were
+        # already submitted to Whisper before the pause kicked in can come
+        # back as transcripts seconds later and would re-trigger her.
+        self._discord.tts_busy_changed.connect(self._on_tts_busy_changed)
 
         self.reply_ready.connect(self._on_reply_ready)
         self.error_reported.connect(self._on_error_reported)
@@ -361,6 +411,7 @@ class AssistantWindow(QMainWindow):
             )
             or _DEFAULT_DISCORD_TTS_PRESET
         )
+        sysaudio_listen = bool(self._settings.value("assistant/sysaudio_listen", False, bool))
 
         # Older defaults required a wake word ("svetlana"), which can make the bot seem deaf.
         if discord_require_wake and discord_wake_word.strip().lower() == "svetlana":
@@ -387,6 +438,12 @@ class AssistantWindow(QMainWindow):
         self._client.set_model(_FORCED_MODEL)
         self._settings.setValue("assistant/model", _FORCED_MODEL)
         self._discord.set_listening_enabled(discord_auto_listen)
+        # Wire the system-audio toggle last so the start() side effect
+        # only fires after everything else is settled.
+        self._sysaudio_listen.setChecked(sysaudio_listen)
+        if sysaudio_listen:
+            self._sysaudio.start()
+            self._sysaudio_mic.start()
         self._update_voice_hint()
         self._update_discord_hint()
 
@@ -406,6 +463,7 @@ class AssistantWindow(QMainWindow):
         self._settings.setValue("assistant/discord_wake_word", wake_word)
         preset_key = str(self._discord_voice_preset.currentData() or _DEFAULT_DISCORD_TTS_PRESET)
         self._settings.setValue("assistant/discord_voice_preset", preset_key)
+        self._settings.setValue("assistant/sysaudio_listen", self._sysaudio_listen.isChecked())
 
     def _save_connection_settings(self) -> None:
         key = self._api_key.text().strip()
@@ -720,6 +778,107 @@ class AssistantWindow(QMainWindow):
         self._discord.set_listening_enabled(enabled)
         self._persist_runtime_settings()
 
+    def _on_sysaudio_listen_toggled(self, enabled: bool) -> None:
+        if enabled:
+            self._sysaudio.start()
+            self._sysaudio_mic.start()
+        else:
+            self._sysaudio.stop()
+            self._sysaudio_mic.stop()
+        self._persist_runtime_settings()
+
+    def _on_tts_busy_changed(self, busy: bool) -> None:
+        if busy:
+            # While playing, push the cooldown deadline far into the future
+            # so any in-flight Whisper job that finishes mid-TTS is also
+            # rejected by the cooldown gate.
+            self._sysaudio_cooldown_until = time.monotonic() + 3600.0
+        else:
+            self._sysaudio_cooldown_until = time.monotonic() + self._sysaudio_post_tts_cooldown_s
+
+    def _on_sysaudio_heard_text(self, speaker: str, transcript: str) -> None:
+        """System-audio path equivalent of _on_discord_heard_text.
+
+        Mirrors the wake-word / quest-session / submit logic of the Discord
+        handler so the response path stays the same — the only difference is
+        the source label and the gating toggle. Refactor candidate once we
+        ship Phase B (friend profiles) and need a shared listening core.
+        """
+        if not self._sysaudio_listen.isChecked():
+            return
+        cleaned = transcript.strip()
+        if not cleaned:
+            return
+        # Junk filter: Whisper hallucinates single words like "you", "thanks",
+        # "okay" from random noise, music, ad tails. Demand at least 2 words
+        # to consider it real input.
+        if len(cleaned.split()) < 2:
+            self.statusBar().showMessage(
+                f"Sysaudio: ignored short fragment '{cleaned}' (likely Whisper noise).",
+                2000,
+            )
+            return
+        # Post-TTS cooldown: while she's talking and for a few seconds after,
+        # ignore everything sysaudio hears so trailing in-flight transcripts
+        # can't trigger a fresh spiral.
+        if time.monotonic() < self._sysaudio_cooldown_until:
+            self.statusBar().showMessage("Sysaudio: ignored during post-TTS cooldown.", 1500)
+            return
+        if self._discord_require_wake.isChecked():
+            wake_word = (self._discord_wake_word.text().strip() or "svetlana").lower()
+            if wake_word and wake_word not in cleaned.lower():
+                self.statusBar().showMessage(
+                    f"Heard {speaker} on system audio; waiting for wake word '{wake_word}'.",
+                    2200,
+                )
+                return
+            cleaned = _strip_wake_word_mentions(cleaned, wake_word)
+            if not cleaned:
+                self.statusBar().showMessage(
+                    f"Heard wake word from {speaker}; waiting for the command after it.",
+                    2200,
+                )
+                return
+
+        lowered = cleaned.lower()
+        if any(
+            phrase in lowered
+            for phrase in ("stop quest", "forget quest", "cancel quest", "new quest")
+        ):
+            self._active_quest = None
+            self.statusBar().showMessage("Quest session cleared.", 2500)
+            if not self._busy:
+                self._submit_prompt(
+                    display_speaker=f"call {speaker}",
+                    display_text=cleaned,
+                    model_text=f"Someone in the call says: {cleaned}",
+                    ingest_memory=False,
+                )
+            return
+        if any(phrase in lowered for phrase in ("what quest", "which quest", "current quest")):
+            quest_name = self._active_quest.name if self._active_quest else None
+            ack = (
+                f"Current quest session: {quest_name}" if quest_name else "No active quest session."
+            )
+            if not self._busy:
+                self._append_chat_line(f"call {speaker}", cleaned)
+                self._append_chat_line("Assistant", ack)
+                if self._discord_speak_back.isChecked() and self._discord.running:
+                    self._discord.speak_in_call(ack)
+            return
+
+        if not self._busy:
+            self._submit_prompt(
+                display_speaker=f"call {speaker}",
+                display_text=cleaned,
+                model_text=f"Someone in the call says: {cleaned}",
+                ingest_memory=True,
+            )
+        else:
+            # Queue it for after current reply finishes (mirror of pending
+            # discord inputs queue).
+            self._pending_discord_inputs.append((speaker, cleaned))
+
     def _on_discord_voice_preset_changed(self, _index: int) -> None:
         preset_key = str(self._discord_voice_preset.currentData() or _DEFAULT_DISCORD_TTS_PRESET)
         self._set_discord_voice_preset(preset_key, persist=True)
@@ -881,6 +1040,8 @@ class AssistantWindow(QMainWindow):
         self._chat_log.moveCursor(QTextCursor.MoveOperation.End)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._sysaudio.stop()
+        self._sysaudio_mic.stop()
         self._discord.shutdown(timeout_s=2.5)
         super().closeEvent(event)
 

@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -135,6 +136,11 @@ class DiscordVoiceLayer(QObject):
     status_changed = Signal(str)
     joined_changed = Signal(bool)
     heard_text = Signal(str, str)  # speaker name, transcript
+    # Emits True when bot starts TTS playback into the voice channel,
+    # False when playback completes. SystemAudioListener subscribes to
+    # this so it can pause capture and avoid feeding the bot's own
+    # voice back into Whisper (infinite-loop scenario).
+    tts_busy_changed = Signal(bool)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -171,7 +177,9 @@ class DiscordVoiceLayer(QObject):
         self._stt_compute_type = (
             os.environ.get("TVASSIST_DISCORD_WHISPER_COMPUTE_TYPE", "int8").strip() or "int8"
         )
-        self._stt_language = os.environ.get("TVASSIST_DISCORD_STT_LANGUAGE", "en").strip() or "en"
+        # Empty string env value → None (Whisper auto-detects language per chunk).
+        _stt_lang_env = os.environ.get("TVASSIST_DISCORD_STT_LANGUAGE", "en").strip()
+        self._stt_language: str | None = _stt_lang_env or None
 
         self._tts_voice = os.environ.get("TVASSIST_DISCORD_TTS_VOICE", "ara").strip() or "ara"
         self._tts_rate = os.environ.get("TVASSIST_DISCORD_TTS_RATE", "+0%").strip() or "+0%"
@@ -497,8 +505,37 @@ class DiscordVoiceLayer(QObject):
             return
         if vc.is_listening():
             return
-        self._sink = voice_recv.BasicSink(self._on_voice_frame, decode=True)
-        vc.listen(self._sink)
+        import sys as _sys
+
+        def _dbg_rtcp(packet):  # type: ignore[no-untyped-def]
+            if not hasattr(self, "_dbg_rtcp_n"):
+                self._dbg_rtcp_n = 0
+            self._dbg_rtcp_n += 1
+            if self._dbg_rtcp_n <= 3 or self._dbg_rtcp_n % 50 == 0:
+                print(
+                    f"[svetlana-dbg] RTCP #{self._dbg_rtcp_n} type={type(packet).__name__}",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+
+        self._sink = voice_recv.BasicSink(
+            self._on_voice_frame,
+            rtcp_event=_dbg_rtcp,
+            decode=True,
+        )
+        try:
+            vc.listen(self._sink)
+            print(
+                f"[svetlana-dbg] vc.listen() returned. "
+                f"vc_type={type(vc).__name__} "
+                f"is_listening={vc.is_listening()} "
+                f"sink={self._sink!r}",
+                file=_sys.stderr,
+                flush=True,
+            )
+        except Exception as _exc:
+            print(f"[svetlana-dbg] vc.listen() RAISED: {_exc!r}", file=_sys.stderr, flush=True)
+            raise
         self.status_changed.emit("Discord voice listening active.")
 
     async def _stop_listening(self) -> None:
@@ -512,6 +549,25 @@ class DiscordVoiceLayer(QObject):
 
     def _on_voice_frame(self, user, data) -> None:  # type: ignore[no-untyped-def]
         """Called by voice-recv for each incoming PCM frame."""
+        # DIAGNOSTIC: count every frame entry
+        if not hasattr(self, "_dbg_frames"):
+            self._dbg_frames = 0
+            self._dbg_voiced = 0
+            self._dbg_submits = 0
+            self._dbg_last_report = 0.0
+        self._dbg_frames += 1
+        _now = time.monotonic()
+        if _now - self._dbg_last_report >= 3.0:
+            self._dbg_last_report = _now
+            import sys as _sys
+
+            print(
+                f"[svetlana-dbg] frames={self._dbg_frames} voiced={self._dbg_voiced} "
+                f"submits={self._dbg_submits} listen_enabled={self._listen_enabled} "
+                f"playing={self._voice_client.is_playing() if self._voice_client else None}",
+                file=_sys.stderr,
+                flush=True,
+            )
         if not self._listen_enabled:
             return
         if self._voice_client is not None and self._voice_client.is_playing():
@@ -581,7 +637,17 @@ class DiscordVoiceLayer(QObject):
                 buf.active = False
                 buf.pcm.clear()
 
+        if voiced:
+            self._dbg_voiced += 1
         if to_submit is not None:
+            self._dbg_submits += 1
+            import sys as _sys
+
+            print(
+                f"[svetlana-dbg] SUBMIT speaker={to_submit[0]} pcm_bytes={len(to_submit[1])}",
+                file=_sys.stderr,
+                flush=True,
+            )
             self._submit_transcription(to_submit[0], to_submit[1])
 
     def _submit_transcription(self, speaker_name: str, pcm_chunk: bytes) -> None:
@@ -682,8 +748,8 @@ class DiscordVoiceLayer(QObject):
             snippet = _normalize_tts_text(text)
             if not snippet:
                 return
-            if len(snippet) > 360:
-                snippet = snippet[:360].rsplit(" ", 1)[0] + "..."
+            if len(snippet) > 1500:
+                snippet = snippet[:1500].rsplit(" ", 1)[0] + "..."
 
             xai_api_key = self._resolve_xai_tts_api_key()
             use_xai_tts = bool(xai_api_key)
@@ -698,8 +764,44 @@ class DiscordVoiceLayer(QObject):
                         snippet,
                         xai_api_key,
                     )
-                    with open(audio_path, "wb") as audio_file:
+                    # xAI's WAV stream ships with malformed RIFF/data chunk
+                    # sizes ("Packet corrupt", "Estimating duration from
+                    # bitrate" warnings). Discord's FFmpegOpusAudio inherits
+                    # those parse errors and produces silent playback.
+                    # Normalize the WAV by re-muxing through a tolerant ffmpeg
+                    # pass before handing it to discord.
+                    raw_path = audio_path + ".raw"
+                    with open(raw_path, "wb") as audio_file:
                         audio_file.write(audio_bytes)
+                    try:
+                        await asyncio.to_thread(
+                            subprocess.run,
+                            [
+                                "ffmpeg",
+                                "-y",
+                                "-nostdin",
+                                "-loglevel",
+                                "error",
+                                "-err_detect",
+                                "ignore_err",
+                                "-fflags",
+                                "+discardcorrupt",
+                                "-i",
+                                raw_path,
+                                "-c:a",
+                                "pcm_s16le",
+                                "-ar",
+                                "48000",
+                                "-ac",
+                                "1",
+                                audio_path,
+                            ],
+                            check=True,
+                            timeout=30,
+                        )
+                    finally:
+                        with contextlib.suppress(Exception):
+                            os.remove(raw_path)
                 else:
                     if edge_tts is None:
                         self.status_changed.emit(
@@ -750,10 +852,17 @@ class DiscordVoiceLayer(QObject):
                         "-packet_loss 0 -fec false -frame_duration 20"
                     ),
                 )
+                self.tts_busy_changed.emit(True)
                 vc.play(source, after=_after)
-                await done
+                try:
+                    await done
+                finally:
+                    self.tts_busy_changed.emit(False)
             except Exception as exc:
                 self.status_changed.emit(f"Discord playback failed: {exc}")
+                # Defensive: in case we emitted True but raised before False.
+                with contextlib.suppress(Exception):
+                    self.tts_busy_changed.emit(False)
             finally:
                 with contextlib.suppress(Exception):
                     os.remove(audio_path)
