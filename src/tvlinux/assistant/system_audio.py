@@ -48,6 +48,55 @@ from PySide6.QtCore import QObject, Signal
 
 __all__ = ["SystemAudioListener", "system_audio_available"]
 
+import re as _re
+
+# Whisper has well-documented hallucinations on silent / low-information
+# audio chunks: it falls back to the most common phrases in its training
+# data, which are YouTube outros and subtitle-credits. We see "Thanks for
+# watching, please subscribe and hit that like button" come through when
+# the room is quiet or background music briefly crosses the VAD threshold.
+# Filter them out before they reach the response pipeline.
+_WHISPER_HALLUCINATION_PATTERNS = [
+    r"^thanks?\s+for\s+watching\b",
+    r"^thank\s+you\s+for\s+watching\b",
+    r"^thank\s+you[.!\s]*$",
+    r"^please\s+(don'?t\s+forget\s+to\s+)?(subscribe|like)\b",
+    r"^(like\s+and\s+)?subscribe(\s+to)?[.!\s]*$",
+    r"^hit\s+(that\s+|the\s+)?like\s+button\b",
+    r"^see\s+you\s+(in\s+)?(the\s+)?next\s+(one|video|time)\b",
+    r"^(subtitles?|captions?)\s+by\b",
+    r"^subtitled\s+by\b",
+    r"^thanks?\s+for\s+listening\b",
+    r"^you[.!]?\s*$",
+    r"^bye[.!\s]*$",
+    r"^the\s+end[.!]?\s*$",
+    r"^\.+\s*$",
+    r"^_+\s*$",
+]
+_WHISPER_HALLUCINATION_RE = _re.compile("|".join(_WHISPER_HALLUCINATION_PATTERNS), _re.IGNORECASE)
+_HALLUCINATION_KEYWORDS = {"watching", "subscribe", "like", "video", "channel", "playlist"}
+
+
+def _looks_like_whisper_hallucination(text: str) -> bool:
+    """Return True for transcripts that match known Whisper hallucinations.
+
+    Two layers:
+      1. Exact-ish match against the known fixed phrases ("thanks for
+         watching", "please subscribe", ".." etc.)
+      2. Heuristic: if the transcript contains 2+ YouTube-outro words
+         (watching, subscribe, like, video, channel, playlist) we treat
+         it as hallucinated outro chatter even if it's a longer variant.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if _WHISPER_HALLUCINATION_RE.match(stripped):
+        return True
+    lowered = stripped.lower()
+    hits = sum(1 for kw in _HALLUCINATION_KEYWORDS if kw in lowered)
+    return hits >= 2
+
+
 # 16 kHz mono int16 — Whisper-native, no resample needed.
 _SAMPLE_RATE = 16_000
 _SAMPLE_WIDTH = 2
@@ -414,6 +463,15 @@ class SystemAudioListener(QObject):
                 os.remove(wav_path)
 
         if transcript:
+            # Drop Whisper's known hallucinations on silent / noisy chunks
+            # ("Thanks for watching, please subscribe...", "Subtitled by
+            # Amara.org", etc.) before they reach the response pipeline.
+            if _looks_like_whisper_hallucination(transcript):
+                now = time.monotonic()
+                if now - self._last_no_words_at >= 20.0:
+                    self._last_no_words_at = now
+                    self.status_changed.emit(f"Filtered Whisper hallucination: {transcript[:60]!r}")
+                return
             # Use the per-instance source label so the handler can tell
             # mic-capture and monitor-capture apart in status messages.
             self.heard_text.emit(self._source_label, transcript)
