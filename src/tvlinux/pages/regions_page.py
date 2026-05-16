@@ -19,6 +19,7 @@ from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QInputDialog,
@@ -45,6 +46,19 @@ from ..ui_helpers import (
 
 ROLE_REGION_ID = Qt.ItemDataRole.UserRole + 1
 
+
+def _debug_log(
+    *,
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict,
+) -> None:
+    _ = (run_id, hypothesis_id, location, message, data)
+    return
+
+
 PRESET_BORDER_COLORS: list[tuple[str, str]] = [
     ("#F43F5E", "Red / urgent"),
     ("#10B981", "Green / heal"),
@@ -52,6 +66,12 @@ PRESET_BORDER_COLORS: list[tuple[str, str]] = [
     ("#A855F7", "Purple / strong"),
     ("#F59E0B", "Orange / buff"),
     ("#94A3B8", "Grey / neutral"),
+]
+
+COOLDOWN_SPELL_CHOICES: list[tuple[str, str]] = [
+    ("off", "Off"),
+    ("exori_gran", "Exori Gran (6s, proc-aware)"),
+    ("executors_throw", "Executor's Throw (10s)"),
 ]
 
 
@@ -69,6 +89,7 @@ class RegionsPage(QWidget):
     border_color_requested = Signal(UUID, str)
     corner_radius_requested = Signal(UUID, int)
     toggle_track_cooldown_requested = Signal(UUID, bool)
+    cooldown_spell_requested = Signal(UUID, str)
     toggle_watch_mode_requested = Signal(UUID, str)
     show_all_requested = Signal(bool)
     lock_all_requested = Signal(bool)
@@ -227,12 +248,26 @@ class RegionsPage(QWidget):
         layout.addWidget(self._chk_lock)
         self._chk_lock.toggled.connect(self._on_lock_toggled)
 
-        self._chk_track_cooldown = QCheckBox("Track cooldown proc (OCR)", c)
-        self._chk_track_cooldown.setToolTip(
-            "Use OCR to watch for cooldown drops (e.g. helmet procs) and flash the border"
+        cooldown_row = QHBoxLayout()
+        cooldown_row.addWidget(QLabel("Spell cooldown tracker", c))
+        self._cmb_cooldown_spell = QComboBox(c)
+        for key, label in COOLDOWN_SPELL_CHOICES:
+            self._cmb_cooldown_spell.addItem(label, key)
+        self._cmb_cooldown_spell.setToolTip(
+            "Pick which spell this region tracks. The border blinks when the "
+            "remaining cooldown reaches the alert threshold."
         )
-        layout.addWidget(self._chk_track_cooldown)
-        self._chk_track_cooldown.toggled.connect(self._on_track_cooldown_toggled)
+        self._cmb_cooldown_spell.currentIndexChanged.connect(self._on_cooldown_spell_changed)
+        cooldown_row.addWidget(self._cmb_cooldown_spell, 1)
+        layout.addLayout(cooldown_row)
+        hint = QLabel(
+            "Use this on tight cooldown-number regions (like your hotbar spell "
+            "icon timer). Exori Gran supports 2s proc compensation.",
+            c,
+        )
+        hint.setWordWrap(True)
+        hint.setProperty("role", "caption")
+        layout.addWidget(hint)
 
         return c
 
@@ -322,7 +357,7 @@ class RegionsPage(QWidget):
             self._chk_grid,
             self._chk_lock,
             self._spin_radius,
-            self._chk_track_cooldown,
+            self._cmb_cooldown_spell,
         ):
             w.blockSignals(True)
         val = round(region.opacity * 100)
@@ -332,7 +367,10 @@ class RegionsPage(QWidget):
         self._chk_grid.setChecked(region.grid)
         self._chk_lock.setChecked(region.locked)
         self._spin_radius.setValue(max(0, min(32, region.corner_radius)))
-        self._chk_track_cooldown.setChecked(region.track_cooldown)
+        idx = self._cmb_cooldown_spell.findData(region.cooldown_spell)
+        if idx < 0:
+            idx = 0
+        self._cmb_cooldown_spell.setCurrentIndex(idx)
         self._apply_border_color_swatch(region.border_color)
         for w in (
             self._opacity_slider,
@@ -340,7 +378,7 @@ class RegionsPage(QWidget):
             self._chk_grid,
             self._chk_lock,
             self._spin_radius,
-            self._chk_track_cooldown,
+            self._cmb_cooldown_spell,
         ):
             w.blockSignals(False)
 
@@ -389,7 +427,32 @@ class RegionsPage(QWidget):
 
     def _on_lock_toggled(self, on: bool) -> None:
         rid = self._current_region_id()
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H22",
+            location="regions_page.py:_on_lock_toggled:entry",
+            message="lock_checkbox_toggled",
+            data={
+                "current_region_id_is_none": rid is None,
+                "next_locked": bool(on),
+                "list_count": int(self._list.count()),
+            },
+        )
+        # endregion
         if rid is not None:
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H22",
+                location="regions_page.py:_on_lock_toggled:emit",
+                message="emitting_toggle_lock_requested",
+                data={
+                    "region_id": str(rid),
+                    "next_locked": bool(on),
+                },
+            )
+            # endregion
             self.toggle_lock_requested.emit(rid, on)
 
     def _on_border_color_clicked(self) -> None:
@@ -418,10 +481,13 @@ class RegionsPage(QWidget):
         if rid is not None:
             self.corner_radius_requested.emit(rid, int(value))
 
-    def _on_track_cooldown_toggled(self, on: bool) -> None:
+    def _on_cooldown_spell_changed(self, _index: int) -> None:
         rid = self._current_region_id()
         if rid is not None:
-            self.toggle_track_cooldown_requested.emit(rid, on)
+            spell = str(self._cmb_cooldown_spell.currentData() or "off")
+            enabled = spell != "off"
+            self.toggle_track_cooldown_requested.emit(rid, enabled)
+            self.cooldown_spell_requested.emit(rid, spell)
 
     # -- Context + actions -----------------------------------------------------
 

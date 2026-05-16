@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import traceback
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -33,16 +34,14 @@ from PySide6.QtWidgets import (
 )
 
 from . import __app_name__, app_icon_path
-from .analyzers import AnalyzerHub, PixelWatchAnalyzer, PresetWatcher
+from .analyzers import AnalyzerHub, CooldownAnalyzer, EventKind, PixelWatchAnalyzer, PresetWatcher
 from .audio_timers import AudioTimer, AudioTimerManager
 from .capture import CaptureCore
 from .clipboard_watcher import ClipboardWatcher
 from .donate_dialog import DonateDialog
 from .hud_panels import (
     AudioTimerPanel,
-    HotbarPanel,
     HuntStatsPanel,
-    MetronomePanel,
     PartyPanel,
 )
 from .hunt_history import HuntHistoryStore, HuntRecord
@@ -61,9 +60,22 @@ from .shortcuts import GlobalShortcutManager, ShortcutSpec
 from .smart_hud import SmartHud
 from .snap import SNAP_THRESHOLD, MirrorGroupManager, compute_snap
 from .theme import apply as apply_theme
+from .tibia_reborn_server import TibiaRebornServer
 from .trigger_engine import TriggerEngine, default_rules
 
 log = get_logger(__name__)
+
+
+def _debug_log(
+    *,
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict,
+) -> None:
+    _ = (run_id, hypothesis_id, location, message, data)
+    return
 
 
 class Application(QObject):
@@ -71,9 +83,21 @@ class Application(QObject):
 
     quit_requested = Signal()
 
-    def __init__(self, *, use_portal: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        use_portal: bool = True,
+        overlay_backend: str = "XWayland (override-redirect)",
+    ) -> None:
         super().__init__()
         self._use_portal = use_portal
+        # Free-form label for the "Overlay mode" status line in the
+        # control panel. Set by ``__main__`` based on the chosen Qt
+        # platform plugin and whether layer-shell negotiation succeeded.
+        # Purely informational -- the actual always-on-top mechanism is
+        # decided in :mod:`tvlinux.mirror_window` from the live QPA name,
+        # not this string.
+        self._overlay_backend = overlay_backend
 
         self._regions = RegionManager(self)
         self._profiles = ProfileManager(self._regions)
@@ -84,11 +108,12 @@ class Application(QObject):
         self._groups = MirrorGroupManager()
         self._last_frame: QImage | None = None
         self._picker: FloatingRegionPicker | None = None
-        # "floating" | "companion" | "both". Governs whether
-        # :class:`MirrorWindow` instances are actually shown on every
-        # incoming frame / region_added event. The CompanionPage receives
-        # frames unconditionally -- it's cheap, and the page is hidden
-        # until the user navigates to it anyway.
+        self._debug_first_frame_logged = False
+        self._debug_frame_counter = 0
+        self._debug_heartbeat_count = 0
+        # Mirror placement policy from settings. Companion mode has been
+        # retired from the shell UI, so this effectively stays "floating"
+        # in normal operation.
         self._mirror_placement: str = load_mirror_placement()
         # Region ids whose mirror should be raised above whatever the
         # compositor promotes when the FloatingRegionPicker unmaps.
@@ -109,11 +134,14 @@ class Application(QObject):
         self._hunt_mode = HuntModeManager(parent=self)
         self._hunt_history = HuntHistoryStore()
 
+        self._reborn_server = TibiaRebornServer(self)
+
         self._control = ShellWindow(
             regions=self._regions,
             hunt_mode=self._hunt_mode,
             audio_timers=self._audio,
             hunt_history=self._hunt_history,
+            reborn_server=self._reborn_server,
             hud_visible=True,
         )
         self._capture = CaptureCore(use_portal=use_portal, parent=self)
@@ -148,10 +176,13 @@ class Application(QObject):
         # orchestration needed here.
         self._preset_watcher = PresetWatcher(self._hub, parent=self)
         self._pixel_watch = PixelWatchAnalyzer(self._regions)
+        self._cooldown_watch = CooldownAnalyzer(self._regions)
         self._hub.register(self._pixel_watch)
+        self._hub.register(self._cooldown_watch)
         self._clipboard_watcher = ClipboardWatcher(
             self._hub, hunt_mode=self._hunt_mode, parent=self
         )
+        self._hub.subscribe(EventKind.SPELL_COOLDOWN_SOON, self._on_spell_cooldown_soon)
         # Auto-log captured hunts to the history store when the user has
         # opted in via ``auto_log_to_history`` (default: on). The store
         # writes to disk so the history survives restarts.
@@ -166,8 +197,6 @@ class Application(QObject):
         # register_panel() call below; SmartHud itself stays untouched.
         self._hud = SmartHud(bus=self._hub, parent=None)
         self._hud.register_panel(AudioTimerPanel(self._audio))
-        self._hud.register_panel(MetronomePanel())
-        self._hud.register_panel(HotbarPanel(self._hub))
         self._hud.register_panel(HuntStatsPanel(self._hub))
         self._hud.register_panel(PartyPanel(self._hub))
 
@@ -203,6 +232,10 @@ class Application(QObject):
         self._safety_raise_timer.setInterval(1500)
         self._safety_raise_timer.setTimerType(Qt.TimerType.CoarseTimer)
         self._safety_raise_timer.timeout.connect(self._safety_raise_tick)
+        self._debug_heartbeat_timer = QTimer(self)
+        self._debug_heartbeat_timer.setInterval(1000)
+        self._debug_heartbeat_timer.setTimerType(Qt.TimerType.CoarseTimer)
+        self._debug_heartbeat_timer.timeout.connect(self._debug_heartbeat_tick)
 
     # -- Wiring -----------------------------------------------------------------------
 
@@ -225,8 +258,9 @@ class Application(QObject):
         self._control.border_color_requested.connect(self._set_border_color)
         self._control.corner_radius_requested.connect(self._set_corner_radius)
         self._control.toggle_track_cooldown_requested.connect(self._set_track_cooldown)
+        self._control.cooldown_spell_requested.connect(self._set_cooldown_spell)
         self._control.show_all_requested.connect(self._regions.set_all_visible)
-        self._control.lock_all_requested.connect(self._regions.set_all_locked)
+        self._control.lock_all_requested.connect(self._set_all_locked)
         self._control.save_profile_requested.connect(self._save_profile)
         self._control.load_profile_requested.connect(self._load_profile)
         self._control.delete_profile_requested.connect(self._delete_profile)
@@ -308,11 +342,23 @@ class Application(QObject):
 
     def start(self) -> None:
         self._control.set_status("Requesting capture via XDG ScreenCast portal...")
+        self._control.set_overlay_backend(self._overlay_backend)
+        log.info("overlay.backend_label", label=self._overlay_backend)
         self._control.show()
         self._hud.show()
         self._capture.start()
         self._register_shortcuts()
-        if load_mirror_safety_raise_enabled():
+        self._debug_heartbeat_timer.start()
+        # The reactive / safety-net raise logic only helps on Wayland
+        # xdg-toplevel surfaces where the compositor gets to pick Z-order.
+        # When the default xcb backend is in use, mirrors are X11
+        # override-redirect windows (bypass-WM) -- KWin cannot re-stack
+        # them, so raising them on every focus change or on a 1.5 s tick
+        # is pure no-op churn. We disable the timer in that case. The
+        # ``focusWindowChanged`` / ``applicationStateChanged`` hooks stay
+        # connected because they're cheap and still useful under
+        # ``--force-wayland``.
+        if load_mirror_safety_raise_enabled() and not self._overlay_backend.startswith("XWayland"):
             self._safety_raise_timer.start()
 
     def _set_hud_visible(self, visible: bool) -> None:
@@ -351,6 +397,7 @@ class Application(QObject):
         self._profiles.save_to_disk()
         self._capture.stop()
         self._shortcuts.stop()
+        self._reborn_server.stop()
         QApplication.quit()
 
     # -- Capture feedback -------------------------------------------------------------
@@ -376,10 +423,17 @@ class Application(QObject):
         (
             "pipewiresrc",
             "The PipeWire capture plugin is missing.",
-            "TibiaVision reads pixels through GStreamer's PipeWire plugin. On "
-            "Fedora / Bazzite install it with:\n\n"
-            "    sudo dnf install gstreamer1-plugin-pipewire\n\n"
-            "Then restart the app.",
+            "TibiaVision reads pixels through GStreamer's PipeWire plugin. "
+            "Install it for your distro and restart the app:\n\n"
+            "  \u2022 Fedora Workstation:\n"
+            "      sudo dnf install gstreamer1-plugin-pipewire\n"
+            "  \u2022 Bazzite / Silverblue / Kinoite (immutable):\n"
+            "      rpm-ostree install gstreamer1-plugin-pipewire\n"
+            "      systemctl reboot\n"
+            "  \u2022 Arch:\n"
+            "      sudo pacman -S gst-plugin-pipewire\n"
+            "  \u2022 Debian / Ubuntu:\n"
+            "      sudo apt install gstreamer1.0-pipewire",
         ),
         (
             "gstreamer",
@@ -423,18 +477,67 @@ class Application(QObject):
 
     def _on_frame(self, image: QImage) -> None:
         self._last_frame = image
+        self._debug_frame_counter += 1
+        if not self._debug_first_frame_logged:
+            self._debug_first_frame_logged = True
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H10",
+                location="app.py:_on_frame:first_frame",
+                message="app_received_first_frame",
+                data={
+                    "width": int(image.width()),
+                    "height": int(image.height()),
+                    "mirror_count": len(self._mirrors),
+                    "picker_visible": bool(self._picker.isVisible())
+                    if self._picker is not None
+                    else False,
+                },
+            )
+            # endregion
+        elif self._debug_frame_counter % 240 == 0:
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H41",
+                location="app.py:_on_frame:heartbeat",
+                message="frame_heartbeat",
+                data={
+                    "frame_count": int(self._debug_frame_counter),
+                    "width": int(image.width()),
+                    "height": int(image.height()),
+                    "mirror_count": len(self._mirrors),
+                    "picker_visible": bool(self._picker.isVisible())
+                    if self._picker is not None
+                    else False,
+                },
+            )
+            # endregion
         for mirror in self._mirrors.values():
             mirror.set_frame(image)
-        # Companion tiles always receive frames. The page is a normal
-        # tab in the shell stack; painting is cheap, and gating on
-        # visibility would cause tiles to flash-blank on first focus.
-        self._control.companion_page.set_frame(image)
         if self._picker is not None and self._picker.isVisible():
             self._picker.set_frame(image)
 
     # -- Region CRUD actions ---------------------------------------------------------
 
     def _open_region_picker(self) -> None:
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H6",
+            location="app.py:_open_region_picker:entry",
+            message="open_region_picker_requested",
+            data={
+                "has_last_frame": self._last_frame is not None,
+                "picker_exists": self._picker is not None,
+                "picker_visible": bool(self._picker.isVisible())
+                if self._picker is not None
+                else False,
+                "region_count": len(self._regions),
+            },
+        )
+        # endregion
         if self._last_frame is None:
             QMessageBox.information(
                 self._control,
@@ -471,11 +574,30 @@ class Application(QObject):
         region = Region(
             name=f"Region {len(self._regions) + 1}",
             rect=rect,
+            # Freshly-created gameplay overlays should be immediately
+            # non-intrusive: locked mirrors are click-through and don't
+            # request keyboard focus. Users can still unlock to reposition.
+            locked=True,
         )
         # Tag the id before emitting region_added so _create_mirror
         # (direct signal connection, runs synchronously inside .add)
         # knows to raise the new window above Tibia.
         self._pending_raise_ids.add(region.id)
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H6",
+            location="app.py:_create_region_from_rect:before_add",
+            message="region_from_picker_ready",
+            data={
+                "region_id": str(region.id),
+                "rect_w": int(rect.width()),
+                "rect_h": int(rect.height()),
+                "rect_x": int(rect.x()),
+                "rect_y": int(rect.y()),
+            },
+        )
+        # endregion
         self._regions.add(region)
         self._profiles.save_to_disk()
 
@@ -506,8 +628,38 @@ class Application(QObject):
         r = self._regions.get(region_id)
         if r is None:
             return
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H16",
+            location="app.py:_set_locked:request",
+            message="set_locked_requested",
+            data={
+                "region_id": str(region_id),
+                "prev_locked": bool(r.locked),
+                "next_locked": bool(locked),
+                "has_geometry": r.geometry is not None,
+            },
+        )
+        # endregion
         r.locked = locked
         self._regions.update(r)
+
+    def _set_all_locked(self, locked: bool) -> None:
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H21",
+            location="app.py:_set_all_locked:request",
+            message="set_all_locked_requested",
+            data={
+                "locked": bool(locked),
+                "region_count": len(self._regions),
+                "mirror_count": len(self._mirrors),
+            },
+        )
+        # endregion
+        self._regions.set_all_locked(locked)
 
     def _set_glow(self, region_id: UUID, on: bool) -> None:
         r = self._regions.get(region_id)
@@ -549,7 +701,37 @@ class Application(QObject):
         if r is None:
             return
         r.track_cooldown = bool(on)
+        if not r.track_cooldown:
+            r.cooldown_spell = "off"
+        elif r.cooldown_spell == "off":
+            # Back-compat path for older UI surfaces that only send the bool.
+            r.cooldown_spell = "exori_gran"
         self._regions.update(r)
+
+    def _set_cooldown_spell(self, region_id: UUID, spell: str) -> None:
+        r = self._regions.get(region_id)
+        if r is None:
+            return
+        if spell not in {"off", "exori_gran", "executors_throw"}:
+            spell = "off"
+        r.cooldown_spell = spell  # type: ignore[assignment]
+        r.track_cooldown = spell != "off"
+        self._regions.update(r)
+
+    def _on_spell_cooldown_soon(self, event) -> None:  # type: ignore[no-untyped-def]
+        region_id_raw = event.data.get("region_id")
+        if region_id_raw is None:
+            return
+        try:
+            region_id = UUID(str(region_id_raw))
+        except (ValueError, TypeError):
+            return
+        mirror = self._mirrors.get(region_id)
+        if mirror is not None and mirror.isVisible():
+            mirror.trigger_cooldown_alert()
+        name = str(event.data.get("name") or "Spell")
+        remaining = float(event.data.get("remaining_s") or 0.0)
+        self._control.set_status(f"{name}: cooldown almost ready ({remaining:.1f}s)")
 
     def _set_watch_mode(self, region_id: UUID, mode: str) -> None:
         r = self._regions.get(region_id)
@@ -623,15 +805,40 @@ class Application(QObject):
     def _create_mirror(self, region: Region) -> None:
         if region.id in self._mirrors:
             return
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H3",
+            location="app.py:_create_mirror:entry",
+            message="creating_mirror",
+            data={
+                "region_id": str(region.id),
+                "visible": bool(region.visible),
+                "locked": bool(region.locked),
+                "has_geometry": region.geometry is not None,
+            },
+        )
+        # endregion
         mirror = MirrorWindow(region)
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H3",
+            location="app.py:_create_mirror:after_ctor",
+            message="mirror_ctor_returned",
+            data={
+                "region_id": str(region.id),
+                "is_visible": bool(mirror.isVisible()),
+                "window_title": mirror.windowTitle(),
+            },
+        )
+        # endregion
         mirror.rename_requested.connect(self._rename_region)
         mirror.delete_requested.connect(self._delete_region)
         mirror.region_updated.connect(self._on_mirror_region_updated)
         mirror.moved.connect(self._on_mirror_moved)
         mirror.unlink_requested.connect(self._on_unlink_requested)
         self._mirrors[region.id] = mirror
-        # In "companion"-only mode the mirror exists (so we keep the same
-        # signal wiring + cheap set_frame path) but never shows itself.
         if region.visible and self._floating_mirrors_enabled():
             # Try to promote to a wlr-layer-shell overlay BEFORE the
             # first show(). The surface role is committed on the first
@@ -650,6 +857,20 @@ class Application(QObject):
             else:
                 log.debug("mirror.layer_shell_unavailable_fallback_to_reraise")
             mirror.show()
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H3",
+                location="app.py:_create_mirror:after_show",
+                message="mirror_show_completed",
+                data={
+                    "region_id": str(region.id),
+                    "promoted": bool(promoted),
+                    "pending_raise": region.id in self._pending_raise_ids,
+                    "is_visible": bool(mirror.isVisible()),
+                },
+            )
+            # endregion
             # Only run the 3-stage raise on surfaces that need it.
             # Layer-shell overlays outrank fullscreen windows by design;
             # raising them is cosmetic at best and potentially steals a
@@ -669,17 +890,60 @@ class Application(QObject):
         wins the Z-order before the compositor applies our `_NET_WM_STATE_ABOVE`
         hint.
 
-        ``mirror`` is captured by value into the deferred closures so
-        that a regions reset or delete between stages can't raise a
-        now-destroyed widget: each closure re-checks ``id(mirror) in
-        self._mirrors.values()`` via the id -> mirror mapping by id()
-        lookup... in practice we just guard on ``isVisible()`` and the
-        weak-ish "still owned by us" check of ``mirror in self._mirrors.values()``.
+        Critically this uses ``raise_()`` only and never
+        ``activateWindow()``. Activating a mirror steals keyboard focus
+        from Tibia and breaks gameplay (WASD / hotkeys start going to us
+        instead of the game). We only need Z-order, not activation.
+
+        ``mirror`` is captured by value into the deferred closures so that
+        a regions reset or delete between stages can't raise a now-destroyed
+        widget; each closure re-checks ownership + visibility first.
         """
         if mirror is None:
             return
+        debug_region_id = str(getattr(mirror, "region_id", "unknown"))
+        seq_id = int(getattr(self, "_debug_reraise_seq", 0)) + 1
+        self._debug_reraise_seq = seq_id
+        pending = int(getattr(self, "_debug_reraise_pending", 0)) + 2
+        self._debug_reraise_pending = pending
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H43",
+            location="app.py:_reraise_sequence:schedule",
+            message="reraise_sequence_scheduled",
+            data={
+                "seq_id": seq_id,
+                "region_id": debug_region_id,
+                "pending_callbacks": pending,
+            },
+        )
+        # endregion
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H20",
+            location="app.py:_reraise_sequence:immediate",
+            message="mirror_reraise_immediate",
+            data={
+                "region_id": debug_region_id,
+                "is_visible": bool(mirror.isVisible()),
+            },
+        )
+        # endregion
         mirror.raise_()
-        mirror.activateWindow()
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H33",
+            location="app.py:_reraise_sequence:immediate_after_raise",
+            message="mirror_reraise_immediate_returned",
+            data={
+                "region_id": debug_region_id,
+                "is_visible": bool(mirror.isVisible()),
+            },
+        )
+        # endregion
 
         def _still_live() -> MirrorWindow | None:
             # Re-fetch by identity so we never touch a mirror the region
@@ -692,17 +956,128 @@ class Application(QObject):
         def _reraise() -> None:
             m = _still_live()
             if m is None:
+                pending_now = max(0, int(getattr(self, "_debug_reraise_pending", 0)) - 1)
+                self._debug_reraise_pending = pending_now
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H43",
+                    location="app.py:_reraise_sequence:single_shot_0_done",
+                    message="reraise_zero_ms_callback_completed",
+                    data={
+                        "seq_id": seq_id,
+                        "region_id": debug_region_id,
+                        "mirror_live": False,
+                        "pending_callbacks": pending_now,
+                    },
+                )
+                # endregion
                 return
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H20",
+                location="app.py:_reraise_sequence:single_shot_0",
+                message="mirror_reraise_zero_ms",
+                data={
+                    "region_id": debug_region_id,
+                    "is_visible": bool(m.isVisible()),
+                },
+            )
+            # endregion
             m.raise_()
-            m.activateWindow()
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H33",
+                location="app.py:_reraise_sequence:single_shot_0_after_raise",
+                message="mirror_reraise_zero_ms_returned",
+                data={
+                    "region_id": debug_region_id,
+                    "is_visible": bool(m.isVisible()),
+                },
+            )
+            # endregion
+            pending_now = max(0, int(getattr(self, "_debug_reraise_pending", 0)) - 1)
+            self._debug_reraise_pending = pending_now
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H43",
+                location="app.py:_reraise_sequence:single_shot_0_done",
+                message="reraise_zero_ms_callback_completed",
+                data={
+                    "seq_id": seq_id,
+                    "region_id": debug_region_id,
+                    "mirror_live": True,
+                    "pending_callbacks": pending_now,
+                },
+            )
+            # endregion
 
         QTimer.singleShot(0, _reraise)
 
         def _final() -> None:
             m = _still_live()
             if m is not None:
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H20",
+                    location="app.py:_reraise_sequence:single_shot_250",
+                    message="mirror_reraise_250ms",
+                    data={
+                        "region_id": debug_region_id,
+                        "is_visible": bool(m.isVisible()),
+                    },
+                )
+                # endregion
                 m.raise_()
-                m.activateWindow()
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H33",
+                    location="app.py:_reraise_sequence:single_shot_250_after_raise",
+                    message="mirror_reraise_250ms_returned",
+                    data={
+                        "region_id": debug_region_id,
+                        "is_visible": bool(m.isVisible()),
+                    },
+                )
+                # endregion
+            pending_now = max(0, int(getattr(self, "_debug_reraise_pending", 0)) - 1)
+            self._debug_reraise_pending = pending_now
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H43",
+                location="app.py:_reraise_sequence:single_shot_250_done",
+                message="reraise_250ms_callback_completed",
+                data={
+                    "seq_id": seq_id,
+                    "region_id": debug_region_id,
+                    "mirror_live": m is not None,
+                    "pending_callbacks": pending_now,
+                },
+            )
+            # endregion
+
+            def _post_final_tick() -> None:
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H40",
+                    location="app.py:_reraise_sequence:post_final_tick",
+                    message="reraise_post_final_tick_alive",
+                    data={
+                        "seq_id": seq_id,
+                        "region_id": debug_region_id,
+                        "pending_callbacks": int(getattr(self, "_debug_reraise_pending", 0)),
+                    },
+                )
+                # endregion
+
+            QTimer.singleShot(1, _post_final_tick)
 
         QTimer.singleShot(250, _final)
 
@@ -736,14 +1111,66 @@ class Application(QObject):
         Mirrors promoted to a wlr-layer-shell overlay surface are
         skipped: the protocol already guarantees they sit above all
         xdg-shell windows including fullscreen ones, and raising /
-        activating a layer-shell surface is a protocol-level no-op in
-        most compositors.
+        activating a layer-shell surface is unnecessary in most
+        compositors.
         """
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H30",
+            location="app.py:_raise_all_mirrors:entry",
+            message="raise_all_mirrors_called",
+            data={
+                "mirror_count": len(self._mirrors),
+                "promoted_count": len(self._layer_shell_promoted),
+                "active_window_is_none": QApplication.activeWindow() is None,
+            },
+        )
+        # endregion
         for rid, mirror in self._mirrors.items():
             if rid in self._layer_shell_promoted:
                 continue
             if mirror.isVisible():
                 self._reraise_sequence(mirror)
+
+    def _auto_lock_all_mirrors_for_gameplay(self) -> None:
+        """Hardening: force mirrors into click-through mode on focus loss.
+
+        Losing focus to Tibia while any mirror is unlocked is a common
+        "why can't I move/cast?" trap: unlocked mirrors are intentionally
+        interactive and can intercept mouse/keyboard input. As soon as
+        focus leaves our process, lock everything so every mirror becomes
+        transparent-for-input before the user resumes gameplay.
+        """
+        unlocked_count = sum(1 for region in self._regions if not region.locked)
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H34",
+            location="app.py:_auto_lock_all_mirrors_for_gameplay:count",
+            message="auto_lock_evaluated",
+            data={
+                "unlocked_count": int(unlocked_count),
+                "region_count": (len(self._regions) if hasattr(self._regions, "__len__") else -1),
+                "mirror_count": len(self._mirrors),
+            },
+        )
+        # endregion
+        if unlocked_count == 0:
+            return
+        self._regions.set_all_locked(True)
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H34",
+            location="app.py:_auto_lock_all_mirrors_for_gameplay:applied",
+            message="auto_lock_applied",
+            data={
+                "locked_regions": (len(self._regions) if hasattr(self._regions, "__len__") else -1),
+            },
+        )
+        # endregion
+        self._control.set_status("Auto-locked all mirrors for gameplay (click-through).")
 
     def _on_focus_window_changed(self, window: QWindow | None) -> None:
         """Re-raise mirrors when focus moves outside our app.
@@ -755,13 +1182,39 @@ class Application(QObject):
         back above it right now they stay buried until the user clicks
         one of our windows again.
         """
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H30",
+            location="app.py:_on_focus_window_changed:entry",
+            message="focus_window_changed",
+            data={
+                "window_is_none": window is None,
+                "mirror_count": len(self._mirrors),
+                "region_count": (len(self._regions) if hasattr(self._regions, "__len__") else -1),
+            },
+        )
+        # endregion
         if window is not None:
             # Focus stayed inside our app (control panel, a mirror, the
             # picker, etc.). Nothing to do.
             return
+        self._auto_lock_all_mirrors_for_gameplay()
         self._raise_all_mirrors()
 
     def _on_app_state_changed(self, state: Qt.ApplicationState) -> None:
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H30",
+            location="app.py:_on_app_state_changed:entry",
+            message="application_state_changed",
+            data={
+                "state": int(getattr(state, "value", -1)),
+                "mirror_count": len(self._mirrors),
+            },
+        )
+        # endregion
         if state == Qt.ApplicationState.ApplicationActive:
             self._raise_all_mirrors()
 
@@ -773,13 +1226,71 @@ class Application(QObject):
         while the user is interacting with any of our own windows so we
         never disrupt their drag/resize/menu gestures.
         """
-        if QApplication.activeWindow() is not None:
+        active = QApplication.activeWindow()
+        if active is not None:
             return
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H30",
+            location="app.py:_safety_raise_tick:entry",
+            message="safety_raise_tick_running",
+            data={
+                "mirror_count": len(self._mirrors),
+                "promoted_count": len(self._layer_shell_promoted),
+            },
+        )
+        # endregion
         for rid, mirror in self._mirrors.items():
             if rid in self._layer_shell_promoted:
                 continue
             if mirror.isVisible():
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H33",
+                    location="app.py:_safety_raise_tick:before_raise",
+                    message="safety_tick_about_to_raise_mirror",
+                    data={
+                        "region_id": str(rid),
+                    },
+                )
+                # endregion
                 mirror.raise_()
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H33",
+                    location="app.py:_safety_raise_tick:after_raise",
+                    message="safety_tick_raise_returned",
+                    data={
+                        "region_id": str(rid),
+                    },
+                )
+                # endregion
+
+    def _debug_heartbeat_tick(self) -> None:
+        if self._debug_heartbeat_count >= 120:
+            self._debug_heartbeat_timer.stop()
+            return
+        self._debug_heartbeat_count += 1
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H40",
+            location="app.py:_debug_heartbeat_tick",
+            message="app_heartbeat",
+            data={
+                "beat": int(self._debug_heartbeat_count),
+                "frame_count": int(self._debug_frame_counter),
+                "mirror_count": len(self._mirrors),
+                "visible_mirror_count": int(
+                    sum(1 for m in self._mirrors.values() if m.isVisible())
+                ),
+                "active_window_is_none": QApplication.activeWindow() is None,
+            },
+        )
+        # endregion
 
     def _destroy_mirror(self, region_id: UUID) -> None:
         mirror = self._mirrors.pop(region_id, None)
@@ -796,7 +1307,51 @@ class Application(QObject):
         if mirror is None:
             self._create_mirror(region)
             return
-        mirror.set_region(region)
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H2",
+            location="app.py:_update_mirror:before_set_region",
+            message="updating_mirror_from_region_change",
+            data={
+                "region_id": str(region.id),
+                "locked": bool(region.locked),
+                "visible": bool(region.visible),
+                "has_geometry": region.geometry is not None,
+            },
+        )
+        # endregion
+        try:
+            mirror.set_region(region)
+        except Exception as exc:
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H11",
+                location="app.py:_update_mirror:set_region_exception",
+                message="mirror_set_region_failed",
+                data={
+                    "region_id": str(region.id),
+                    "exc_type": type(exc).__name__,
+                    "exc": str(exc),
+                    "traceback": traceback.format_exc(limit=8),
+                },
+            )
+            # endregion
+            raise
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H11",
+            location="app.py:_update_mirror:after_set_region",
+            message="mirror_set_region_completed",
+            data={
+                "region_id": str(region.id),
+                "is_visible": bool(mirror.isVisible()),
+                "has_saved_geometry": region.geometry is not None,
+            },
+        )
+        # endregion
         # set_region honours region.visible on its own, which would
         # re-show a mirror we intentionally hid while in companion-only
         # mode. Re-assert the placement policy here.
@@ -810,12 +1365,52 @@ class Application(QObject):
             self._create_mirror(r)
 
     def _on_mirror_region_updated(self, region: Region) -> None:
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H13",
+            location="app.py:_on_mirror_region_updated:entry",
+            message="mirror_emitted_region_updated",
+            data={
+                "region_id": str(region.id),
+                "locked": bool(region.locked),
+                "visible": bool(region.visible),
+                "has_geometry": region.geometry is not None,
+            },
+        )
+        # endregion
         self._regions.update(region)
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H25",
+            location="app.py:_on_mirror_region_updated:after_update",
+            message="mirror_region_update_applied",
+            data={
+                "region_id": str(region.id),
+                "has_geometry": region.geometry is not None,
+            },
+        )
+        # endregion
         QTimer.singleShot(500, self._profiles.save_to_disk)
 
     # -- Snap + group drag ------------------------------------------------------------
 
     def _on_mirror_moved(self, region_id: UUID, delta: QPoint, final: bool) -> None:
+        if final:
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H26",
+                location="app.py:_on_mirror_moved:final_entry",
+                message="final_move_signal_received",
+                data={
+                    "region_id": str(region_id),
+                    "delta_x": int(delta.x()),
+                    "delta_y": int(delta.y()),
+                },
+            )
+            # endregion
         if delta.isNull():
             if final:
                 self._try_snap(region_id)
@@ -830,6 +1425,17 @@ class Application(QObject):
                 peer.move(peer.pos() + delta)
         if final:
             self._try_snap(region_id)
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H26",
+                location="app.py:_on_mirror_moved:final_exit",
+                message="final_move_signal_processed",
+                data={
+                    "region_id": str(region_id),
+                },
+            )
+            # endregion
 
     def _try_snap(self, region_id: UUID) -> None:
         mirror = self._mirrors.get(region_id)
@@ -850,6 +1456,22 @@ class Application(QObject):
                 continue
             snapped = compute_snap(src_rect, other.geometry(), SNAP_THRESHOLD)
             if snapped is not None and snapped != src_rect:
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H26",
+                    location="app.py:_try_snap:apply",
+                    message="applying_snap_after_final_move",
+                    data={
+                        "region_id": str(region_id),
+                        "other_id": str(other_id),
+                        "from_x": int(src_rect.x()),
+                        "from_y": int(src_rect.y()),
+                        "to_x": int(snapped.x()),
+                        "to_y": int(snapped.y()),
+                    },
+                )
+                # endregion
                 mirror.setGeometry(snapped)
                 self._groups.join(region_id, other_id)
                 self._refresh_peer_flags()
@@ -1006,14 +1628,6 @@ class Application(QObject):
                 description="TibiaVision-Linux: show all mirror windows",
                 default_trigger="CTRL+SHIFT+s",
             ),
-            ShortcutSpec(
-                id="toggle_lock_all",
-                description=(
-                    "TibiaVision-Linux: lock/unlock all mirror windows "
-                    "(locked mirrors are click-through so Tibia receives input)"
-                ),
-                default_trigger="CTRL+SHIFT+l",
-            ),
         ]
         for slot in range(10):
             shortcuts.append(
@@ -1026,28 +1640,9 @@ class Application(QObject):
         self._shortcuts.register_handler("cycle_profile", self._cycle_profile)
         self._shortcuts.register_handler("hide_all", lambda: self._regions.set_all_visible(False))
         self._shortcuts.register_handler("show_all", lambda: self._regions.set_all_visible(True))
-        self._shortcuts.register_handler("toggle_lock_all", self._toggle_lock_all)
         for slot in range(10):
             self._shortcuts.register_handler(f"audio_start_{slot}", self._make_audio_starter(slot))
         self._shortcuts.start(shortcuts)
-
-    def _toggle_lock_all(self) -> None:
-        """Global shortcut handler: flip every region's lock state.
-
-        Lets the user switch between "playing" (all mirrors locked /
-        click-through, Tibia gets every click and keypress) and
-        "editing" (all mirrors interactive, can be dragged and
-        resized) from anywhere, even while Tibia has keyboard focus.
-        The policy is "if any mirror is currently unlocked, lock them
-        all"; the inverse direction unlocks them. This matches the
-        most common mental model -- "am I in edit mode or not?" --
-        and means the shortcut is self-correcting: one press is
-        always enough to reach a clean state.
-        """
-        any_unlocked = any(not r.locked for r in self._regions)
-        self._regions.set_all_locked(any_unlocked)
-        state = "locked (click-through)" if any_unlocked else "unlocked (editable)"
-        self._control.set_status(f"All regions {state}.")
 
     def _make_audio_starter(self, slot: int):  # type: ignore[no-untyped-def]
         def _handler() -> None:

@@ -47,6 +47,17 @@ ai = [
     "pytesseract>=0.3.10",
     "onnxruntime>=1.18",
 ]
+assistant = [
+    "discord.py[voice]>=2.5",
+    "discord-ext-voice-recv>=0.5.2a179",
+    "edge-tts>=7.2",
+    "faster-whisper>=1.1",
+    "sounddevice>=0.4",
+    "soundfile>=0.12",
+]
+browser = [
+    "PySide6-WebEngine>=6.7",
+]
 
 [project.urls]
 Homepage = "https://github.com/tibiavision-linux/tibiavision-linux"
@@ -54,9 +65,11 @@ Issues = "https://github.com/tibiavision-linux/tibiavision-linux/issues"
 
 [project.scripts]
 tvlinux = "tvlinux.__main__:main"
+tvassistant = "tvlinux.assistant.__main__:main"
 
 [project.gui-scripts]
 tibiavision-linux = "tvlinux.__main__:main"
+tibiavision-assistant = "tvlinux.assistant.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tvlinux"]

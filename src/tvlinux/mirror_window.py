@@ -30,6 +30,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor,
     QCursor,
+    QGuiApplication,
     QImage,
     QKeyEvent,
     QMouseEvent,
@@ -44,7 +45,35 @@ from PySide6.QtWidgets import QInputDialog, QMenu, QWidget
 
 from .regions import Region
 
+
+def _debug_log(
+    *,
+    run_id: str,
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict,
+) -> None:
+    _ = (run_id, hypothesis_id, location, message, data)
+    return
+
+
+def _is_xcb_platform() -> bool:
+    """True when Qt is running under the xcb (X11 / XWayland) QPA plugin.
+
+    Module-level (rather than a method on :class:`MirrorWindow`) so tests
+    can monkeypatch it without touching class descriptors -- PySide6's
+    signal/slot binding is sensitive to mutated class dicts and crashes
+    when ``staticmethod`` is replaced with a ``MagicMock`` in the middle
+    of ``__init__``.
+    """
+    if QGuiApplication.instance() is None:
+        return False
+    return QGuiApplication.platformName() == "xcb"
+
+
 RESIZE_MARGIN = 6  # pixels from edge considered an "edge" for resizing
+_ALERT_BLINK_TICK_MS = 110
 
 
 # Edge bitmask: 1=Left, 2=Right, 4=Top, 8=Bottom
@@ -68,6 +97,20 @@ class MirrorWindow(QWidget):
     def __init__(self, region: Region, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._region = region
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H7",
+            location="mirror_window.py:__init__:entry",
+            message="mirror_window_ctor_entered",
+            data={
+                "region_id": str(region.id),
+                "visible": bool(region.visible),
+                "locked": bool(region.locked),
+                "has_geometry": region.geometry is not None,
+            },
+        )
+        # endregion
         self._source_image: QImage | None = None
         self._hover_edge: int = 0
         self._glow_phase: float = 0.0
@@ -81,22 +124,17 @@ class MirrorWindow(QWidget):
         self._move_debounce.setInterval(80)
         self._move_debounce.timeout.connect(self._emit_final_move)
         self._last_delta: QPoint = QPoint()
+        self._geometry_dirty: bool = False
+        self._cooldown_alert_remaining_ms: int = 0
+        self._cooldown_alert_visible: bool = False
+        self._debug_first_paint_logged: bool = False
+        self._debug_paint_count: int = 0
+        self._debug_set_frame_count: int = 0
+        self._cooldown_alert_timer = QTimer(self)
+        self._cooldown_alert_timer.setInterval(_ALERT_BLINK_TICK_MS)
+        self._cooldown_alert_timer.timeout.connect(self._on_cooldown_alert_tick)
 
-        # Qt.Window is explicit here so the compositor treats the mirror as a
-        # real top-level surface. Without it, Tool + WindowStaysOnTopHint
-        # together sometimes lose their "always on top" promise on Wayland
-        # when another frameless/tool window (the FloatingRegionPicker) closes
-        # immediately above us -- Tibia would end up drawn on top of a freshly
-        # shown mirror. Pairing Window with Tool matches the picker's own
-        # flag set and keeps the stacking stable.
-        flags = (
-            Qt.WindowType.Window
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.Tool
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.NoDropShadowWindowHint
-        )
-        self.setWindowFlags(flags)
+        self.setWindowFlags(self._compute_window_flags())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         # WA_NoSystemBackground prevents Qt from painting the widget's palette
         # background before paintEvent, which on NVIDIA + Wayland would otherwise
@@ -150,27 +188,84 @@ class MirrorWindow(QWidget):
 
     def set_region(self, region: Region) -> None:
         """Called by the owning app whenever the region model mutates."""
-        prev = self._region
         self._region = region
         self.setWindowTitle(region.name)
-        if region.always_on_top != prev.always_on_top:
-            flags = self.windowFlags()
-            if region.always_on_top:
-                flags |= Qt.WindowType.WindowStaysOnTopHint
-            else:
-                flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        debug_geometry_none = region.geometry is None
+        if debug_geometry_none:
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H12",
+                location="mirror_window.py:set_region:entry",
+                message="set_region_entered_without_saved_geometry",
+                data={
+                    "region_id": str(region.id),
+                    "visible": bool(region.visible),
+                    "locked": bool(region.locked),
+                    "is_visible": bool(self.isVisible()),
+                },
+            )
+            # endregion
+        # Any property that feeds into ``_compute_window_flags`` needs to
+        # trigger a recompute; today that's ``always_on_top`` (toggles
+        # ``WindowStaysOnTopHint``) and ``locked`` (toggles
+        # ``BypassWindowManagerHint`` on xcb, promoting the mirror to an
+        # X11 override-redirect window that KWin cannot re-stack below a
+        # fullscreen/focused Tibia). The naive ``prev.locked != region.locked``
+        # check is unreliable because the context menu mutates the region
+        # in-place before emitting ``region_updated``, so ``prev is region``
+        # by the time we get here; instead we diff the computed flag sets
+        # themselves and only re-apply when they actually changed. That
+        # matters: ``setWindowFlags`` on a mapped X11 window destroys and
+        # re-creates the native window, so doing it on every toggle flashes
+        # the mirror.
+        # Apply input-transparency (widget-attribute + focus policy) FIRST,
+        # before we touch window flags. Qt6 couples the top-level
+        # ``WA_TransparentForMouseEvents`` attribute with the underlying
+        # QWindow's ``WindowTransparentForInput`` flag, so a stale
+        # ``WA_TransparentForMouseEvents == True`` at the moment
+        # ``setWindowFlags`` runs can silently re-introduce
+        # ``WindowTransparentForInput`` into the recomputed flag set and
+        # make an unlock fail to restore click interactivity. Flipping
+        # the attribute first keeps the two state machines coherent.
+        # Unconditional: the context menu mutates the region in-place
+        # before emitting ``region_updated`` (so ``prev is region`` and
+        # a naive diff misses the toggle), and setAttribute is idempotent.
+        self._apply_input_transparency()
+        desired_flags = self._compute_window_flags()
+        if debug_geometry_none:
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H12",
+                location="mirror_window.py:set_region:flags_state",
+                message="set_region_flag_state",
+                data={
+                    "region_id": str(self._region.id),
+                    "flags_changed": int(desired_flags != self.windowFlags()),
+                    "is_visible": bool(self.isVisible()),
+                },
+            )
+            # endregion
+        if desired_flags != self.windowFlags():
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H1",
+                location="mirror_window.py:set_region:flags_rebuild",
+                message="rebuilding_window_flags",
+                data={
+                    "region_id": str(self._region.id),
+                    "locked": bool(self._region.locked),
+                    "visible": bool(self._region.visible),
+                    "was_visible": bool(self.isVisible()),
+                },
+            )
+            # endregion
             was_visible = self.isVisible()
-            self.setWindowFlags(flags)
+            self.setWindowFlags(desired_flags)
             if was_visible:
                 self.show()
-        # Always re-apply input-transparency rather than diffing against
-        # ``prev.locked``. In practice the context menu flips the lock
-        # in-place on ``self._region`` before emitting ``region_updated``,
-        # which means ``prev is region`` by the time we get here and the
-        # naive ``prev.locked != region.locked`` comparison always
-        # reads False. setAttribute is idempotent so the unconditional
-        # call is free.
-        self._apply_input_transparency()
         if region.border_glow and self._glow_anim.state() != QPropertyAnimation.State.Running:
             self._glow_anim.start()
         elif not region.border_glow and self._glow_anim.state() == QPropertyAnimation.State.Running:
@@ -184,25 +279,121 @@ class MirrorWindow(QWidget):
             self.show()
         elif not region.visible and self.isVisible():
             self.hide()
+        if debug_geometry_none:
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H12",
+                location="mirror_window.py:set_region:exit",
+                message="set_region_completed_without_saved_geometry",
+                data={
+                    "region_id": str(self._region.id),
+                    "is_visible": bool(self.isVisible()),
+                    "window_w": int(self.width()),
+                    "window_h": int(self.height()),
+                    "window_handle_is_none": self.windowHandle() is None,
+                },
+            )
+            # endregion
         self.update()
+
+    def _compute_window_flags(self) -> Qt.WindowType:
+        """Assemble the window-flag bitmask for the current region state.
+
+        The base set -- frameless, tool, stays-on-top, no drop shadow --
+        matches what the FloatingRegionPicker uses so stacking stays
+        consistent. ``Qt.Window`` is included explicitly so the compositor
+        treats us as a real top-level (without it, Tool + StaysOnTop can
+        regress to "held below a just-closed sibling" on Plasma Wayland).
+
+        Two conditional flags are layered on top when ``region.locked``:
+
+        **``Qt.WindowTransparentForInput``** (all platforms). This is the
+        Qt flag that actually makes clicks and keystrokes pass through
+        the window to whatever is underneath (i.e., Tibia). Do NOT
+        confuse this with the ``WA_TransparentForMouseEvents`` *widget*
+        attribute, which only reroutes events inside Qt's own widget
+        hierarchy -- on X11/XWayland, a top-level widget with only that
+        attribute still captures X server pointer events and Tibia
+        never sees the click. ``Qt.WindowTransparentForInput`` is the
+        *window-system-level* primitive: on X11 it sets an empty
+        ``XShape`` input region via the XShape extension, on Wayland it
+        sets an empty ``wl_surface.set_input_region``. Both make the
+        window invisible to the display server's hit-testing, which is
+        exactly what "let the user play Tibia through the mirror" means.
+        This was the bug that made the previous XWayland migration
+        regress click-through: widget-level mouse transparency alone is
+        not enough on X11.
+
+        **``Qt.BypassWindowManagerHint``** (xcb only). Maps to the X11
+        ``override_redirect`` flag, which tells the X server "bypass the
+        window manager entirely". Consequences:
+
+        1. KWin / Mutter / any X11 WM cannot re-stack an override-redirect
+           window -- not on focus change, not on fullscreen toggle, not
+           ever. This is the same protocol-level guarantee Discord, Steam,
+           MangoHud, and RivaTuner use to keep their overlays above
+           fullscreen games. Tibia runs under Wine and is therefore
+           always an XWayland client, so our override-redirect window
+           sits in the same rootless X server and beats it by protocol,
+           not by policy.
+        2. No WM interaction means no ``_NET_WM_MOVERESIZE`` /
+           ``startSystemMove``, no WM-drawn decorations, no focus-stealing
+           prevention fighting us. We only accept this trade-off while
+           locked, because a locked mirror is input-transparent anyway
+           and the user has no need to drag/resize it. Unlocking drops
+           both conditional flags so standard WM move/resize works and
+           the mirror can be repositioned like any other window.
+
+        On Wayland (``platformName() == "wayland"``) or offscreen (tests),
+        ``BypassWindowManagerHint`` is a no-op, so omitting it costs
+        nothing and keeps the flag bitmask predictable. Stay-on-top under
+        ``--force-wayland`` is instead provided by
+        :mod:`tvlinux.layer_shell`'s overlay-layer promotion.
+        """
+        flags = (
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.NoDropShadowWindowHint
+        )
+        if self._region.locked:
+            flags |= Qt.WindowType.WindowTransparentForInput
+            if _is_xcb_platform():
+                flags |= Qt.WindowType.BypassWindowManagerHint
+        return flags
 
     def _apply_input_transparency(self) -> None:
         """Flip the mirror between click-through and interactive.
 
-        This is what actually lets the user *play Tibia* while a mirror
-        is on top of it. On Wayland, pointer events are routed by the
-        compositor to whichever surface owns the input region at the
-        cursor position. A mirror that accepts clicks will swallow them
-        before they ever reach Tibia -- the user tries to cast a spell
-        through a spellbar mirror and nothing happens because the
-        compositor delivered the click to us and we silently dropped
-        it. Qt's ``WA_TransparentForMouseEvents`` on a top-level widget
-        translates to ``wl_surface.set_input_region(empty)`` on the
-        Wayland side, which tells the compositor "skip this surface
-        for pointer hit-testing, deliver to whatever's underneath"
-        (i.e., Tibia). This is the exact mechanism TibiaVision.com
-        describes as "strictly click-through"; it is also what
-        :class:`~tvlinux.smart_hud.SmartHud` already uses for the HUD.
+        The *load-bearing* click-through mechanism is the
+        ``Qt.WindowTransparentForInput`` window flag applied in
+        :meth:`_compute_window_flags`. That flag is what instructs the
+        display server (X11 via XShape, Wayland via
+        ``wl_surface.set_input_region``) to skip the mirror during
+        pointer / keyboard hit-testing and deliver the event to Tibia
+        underneath. Without it, the user tries to cast a spell through
+        the spellbar mirror and nothing happens because we captured
+        the click at the window-system level.
+
+        This method handles the Qt-layer consequences of that flag:
+
+        - ``WA_TransparentForMouseEvents``: belt-and-suspenders so any
+          mouse events that somehow still make it into Qt's event
+          queue get routed as if the widget wasn't there. On its own
+          this is not enough on X11 (events are already delivered to
+          the X window before Qt sees them) but it's cheap and
+          harmless to keep.
+        - ``FocusPolicy.NoFocus``: stops Qt from trying to give the
+          window keyboard focus on click. Complements
+          ``Qt.WindowTransparentForInput`` for keystroke routing.
+        - ``clearFocus``: give up any focus we hold *right now*, so
+          the next keypress goes to whichever window the WM decides
+          instead of getting queued to us.
+        - ``unsetCursor``: reset the cursor shape so a previously
+          hovered edge-resize arrow doesn't persist once the mirror
+          is click-through.
 
         Policy:
 
@@ -213,12 +404,6 @@ class MirrorWindow(QWidget):
           menu, Delete to remove. The mirror will block clicks to
           Tibia while unlocked -- that's the point, the user is
           editing it.
-
-        Toggling ``WA_TransparentForMouseEvents`` on a top-level
-        widget while it is mapped requires a reconfigure round-trip
-        on some compositors to re-commit the input region. Qt handles
-        that internally for us via ``QWindow::requestUpdate`` on
-        attribute change; no show/hide dance needed.
         """
         locked = self._region.locked
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, locked)
@@ -241,13 +426,94 @@ class MirrorWindow(QWidget):
 
     def set_frame(self, image: QImage) -> None:
         """Called on every incoming capture frame."""
+        if self._debug_set_frame_count < 8:
+            self._debug_set_frame_count += 1
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H31",
+                location="mirror_window.py:set_frame",
+                message="mirror_set_frame_called",
+                data={
+                    "region_id": str(self._region.id),
+                    "count": int(self._debug_set_frame_count),
+                    "is_visible": bool(self.isVisible()),
+                    "img_w": int(image.width()),
+                    "img_h": int(image.height()),
+                },
+            )
+            # endregion
         self._source_image = image
         if self._region.visible and self.isVisible():
             self.update()
 
+    def trigger_cooldown_alert(self, duration_ms: int = 1700) -> None:
+        """Blink the border for cooldown-ready alerts.
+
+        Called by :class:`Application` when the cooldown analyzer predicts a
+        tracked spell is about to be ready (e.g. <= 1.9s remaining).
+        """
+        self._cooldown_alert_remaining_ms = max(0, int(duration_ms))
+        self._cooldown_alert_visible = True
+        if self._cooldown_alert_remaining_ms <= 0:
+            self._cooldown_alert_timer.stop()
+            self.update()
+            return
+        self._cooldown_alert_timer.start()
+        self.update()
+
+    def _on_cooldown_alert_tick(self) -> None:
+        if self._cooldown_alert_remaining_ms <= 0:
+            self._cooldown_alert_timer.stop()
+            self._cooldown_alert_visible = False
+            self.update()
+            return
+        self._cooldown_alert_remaining_ms -= _ALERT_BLINK_TICK_MS
+        self._cooldown_alert_visible = not self._cooldown_alert_visible
+        if self._cooldown_alert_remaining_ms <= 0:
+            self._cooldown_alert_timer.stop()
+            self._cooldown_alert_visible = False
+        self.update()
+
     # -- Painting ---------------------------------------------------------------------
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        if self._debug_paint_count < 8:
+            self._debug_paint_count += 1
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H32",
+                location="mirror_window.py:paintEvent:cycle",
+                message="mirror_paint_cycle",
+                data={
+                    "region_id": str(self._region.id),
+                    "count": int(self._debug_paint_count),
+                    "is_visible": bool(self.isVisible()),
+                    "has_source_image": self._source_image is not None,
+                    "w": int(self.width()),
+                    "h": int(self.height()),
+                },
+            )
+            # endregion
+        if not self._debug_first_paint_logged:
+            self._debug_first_paint_logged = True
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H14",
+                location="mirror_window.py:paintEvent:first_paint",
+                message="mirror_first_paint",
+                data={
+                    "region_id": str(self._region.id),
+                    "has_source_image": self._source_image is not None,
+                    "rect_w": int(self._region.rect.width()),
+                    "rect_h": int(self._region.rect.height()),
+                    "window_w": int(self.width()),
+                    "window_h": int(self.height()),
+                },
+            )
+            # endregion
         # Radius clamped so it never exceeds half the shortest side (which would
         # render as a weird lemon shape).
         radius = max(0, min(self._region.corner_radius, min(self.width(), self.height()) // 2))
@@ -321,6 +587,15 @@ class MirrorWindow(QWidget):
         paths so it stays fully visible.
         """
         del path  # reserved for future compositing passes
+        if self._cooldown_alert_visible:
+            # High-contrast blink layer for cooldown-ready alerts.
+            alert_path = self._inset_rounded_path(inset=4)
+            pen = QPen(QColor(255, 64, 64, 255), 8)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(alert_path)
+            return
         base = self._resolve_border_color()
         if self._region.border_glow:
             # Pulse between 0.5 and 1.0 intensity on glow_phase.
@@ -450,19 +725,94 @@ class MirrorWindow(QWidget):
         return edges
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H17",
+                location="mirror_window.py:mousePressEvent:left_entry",
+                message="left_press_received",
+                data={
+                    "region_id": str(self._region.id),
+                    "locked": bool(self._region.locked),
+                    "is_visible": bool(self.isVisible()),
+                    "has_geometry": self._region.geometry is not None,
+                    "window_handle_is_none": self.windowHandle() is None,
+                },
+            )
+            # endregion
         if self._region.locked:
             return
         if event.button() == Qt.MouseButton.LeftButton:
             # Delegate move/resize to the compositor. This is REQUIRED on Wayland
             # (client-side ``self.move()`` is a no-op there) and works fine on X11.
             wh = self.windowHandle()
+            edge = self._edge_at(event.position().toPoint())
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H5",
+                location="mirror_window.py:mousePressEvent:left",
+                message="mirror_move_or_resize_requested",
+                data={
+                    "region_id": str(self._region.id),
+                    "edge_mask": int(edge),
+                    "window_handle_is_none": wh is None,
+                    "locked": bool(self._region.locked),
+                },
+            )
+            # endregion
             if wh is None:
                 return
-            edge = self._edge_at(event.position().toPoint())
-            if edge:
-                wh.startSystemResize(self._qt_edges_from_mask(edge))
-            else:
-                wh.startSystemMove()
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H18",
+                location="mirror_window.py:mousePressEvent:before_system_move",
+                message="about_to_start_system_move_or_resize",
+                data={
+                    "region_id": str(self._region.id),
+                    "edge_mask": int(edge),
+                    "window_handle_is_none": False,
+                },
+            )
+            # endregion
+            try:
+                if edge:
+                    started_raw = wh.startSystemResize(self._qt_edges_from_mask(edge))
+                else:
+                    started_raw = wh.startSystemMove()
+            except Exception as exc:
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H19",
+                    location="mirror_window.py:mousePressEvent:system_move_exception",
+                    message="start_system_move_or_resize_raised",
+                    data={
+                        "region_id": str(self._region.id),
+                        "edge_mask": int(edge),
+                        "exc_type": type(exc).__name__,
+                        "exc": str(exc),
+                    },
+                )
+                # endregion
+                raise
+            started = None if started_raw is None else bool(started_raw)
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H19",
+                location="mirror_window.py:mousePressEvent:after_system_move",
+                message="system_move_or_resize_started",
+                data={
+                    "region_id": str(self._region.id),
+                    "edge_mask": int(edge),
+                    "started": started,
+                    "started_raw_is_none": started_raw is None,
+                },
+            )
+            # endregion
             event.accept()
         elif event.button() == Qt.MouseButton.RightButton:
             self._show_context_menu(event.globalPosition().toPoint())
@@ -494,8 +844,26 @@ class MirrorWindow(QWidget):
         super().moveEvent(event)
         new_pos = self.pos()
         delta = new_pos - self._last_pos
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H2",
+            location="mirror_window.py:moveEvent",
+            message="mirror_move_event",
+            data={
+                "region_id": str(self._region.id),
+                "delta_x": int(delta.x()),
+                "delta_y": int(delta.y()),
+                "suppress_next_move": bool(self._suppress_next_move),
+                "is_visible": bool(self.isVisible()),
+            },
+        )
+        # endregion
         self._last_pos = new_pos
-        self._persist_geometry()
+        # During active drag, keep geometry on the shared Region object
+        # but defer the expensive region_updated -> RegionManager.update ->
+        # app._update_mirror feedback until the move settles.
+        self._persist_geometry(emit_signal=False)
         if self._suppress_next_move:
             self._suppress_next_move = False
             return
@@ -506,7 +874,61 @@ class MirrorWindow(QWidget):
         self._move_debounce.start()
 
     def _emit_final_move(self) -> None:
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H26",
+            location="mirror_window.py:_emit_final_move:entry",
+            message="emit_final_move_entered",
+            data={
+                "region_id": str(self._region.id),
+                "geometry_dirty": bool(self._geometry_dirty),
+                "last_delta_x": int(self._last_delta.x()),
+                "last_delta_y": int(self._last_delta.y()),
+            },
+        )
+        # endregion
+        if self._geometry_dirty:
+            # region agent log
+            _debug_log(
+                run_id="mirror-crash-debug",
+                hypothesis_id="H24",
+                location="mirror_window.py:_emit_final_move:flush_geometry",
+                message="flushing_deferred_geometry_update",
+                data={
+                    "region_id": str(self._region.id),
+                    "has_geometry": self._region.geometry is not None,
+                },
+            )
+            # endregion
+        self._persist_geometry(emit_signal=True)
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H26",
+            location="mirror_window.py:_emit_final_move:after_persist",
+            message="emit_final_move_after_persist",
+            data={
+                "region_id": str(self._region.id),
+                "geometry_dirty": bool(self._geometry_dirty),
+                "has_geometry": self._region.geometry is not None,
+            },
+        )
+        # endregion
         self.moved.emit(self._region.id, self._last_delta, True)
+        # region agent log
+        _debug_log(
+            run_id="mirror-crash-debug",
+            hypothesis_id="H26",
+            location="mirror_window.py:_emit_final_move:after_moved_emit",
+            message="emit_final_move_after_moved_emit",
+            data={
+                "region_id": str(self._region.id),
+                "last_delta_x": int(self._last_delta.x()),
+                "last_delta_y": int(self._last_delta.y()),
+            },
+        )
+        # endregion
 
     def set_has_peers(self, has_peers: bool) -> None:
         """Let the owner tell us whether this mirror is part of a group.
@@ -526,9 +948,11 @@ class MirrorWindow(QWidget):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
-        self._persist_geometry()
+        # Resize can happen as part of a compositor-managed drag. Mirror the
+        # move-path behavior and defer broadcasts while debounce is active.
+        self._persist_geometry(emit_signal=not self._move_debounce.isActive())
 
-    def _persist_geometry(self) -> None:
+    def _persist_geometry(self, *, emit_signal: bool) -> None:
         """Save the live window geometry back onto the region model."""
         # Hidden frameless Tool windows on Wayland occasionally emit spurious
         # move/resize events with compositor-chosen placeholder geometry as
@@ -539,8 +963,55 @@ class MirrorWindow(QWidget):
         new_geo = QRect(self.geometry())
         current = self._region.geometry
         if current is None or current != new_geo:
+            if current is None:
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H15",
+                    location="mirror_window.py:_persist_geometry:first_save",
+                    message="persisting_initial_geometry_for_region",
+                    data={
+                        "region_id": str(self._region.id),
+                        "x": int(new_geo.x()),
+                        "y": int(new_geo.y()),
+                        "w": int(new_geo.width()),
+                        "h": int(new_geo.height()),
+                    },
+                )
+                # endregion
             self._region.geometry = new_geo
-            self.region_updated.emit(self._region)
+            self._geometry_dirty = True
+            if emit_signal:
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H25",
+                    location="mirror_window.py:_persist_geometry:before_emit_region_updated",
+                    message="about_to_emit_region_updated",
+                    data={
+                        "region_id": str(self._region.id),
+                        "x": int(new_geo.x()),
+                        "y": int(new_geo.y()),
+                        "w": int(new_geo.width()),
+                        "h": int(new_geo.height()),
+                        "is_visible": bool(self.isVisible()),
+                    },
+                )
+                # endregion
+                self._geometry_dirty = False
+                self.region_updated.emit(self._region)
+                # region agent log
+                _debug_log(
+                    run_id="mirror-crash-debug",
+                    hypothesis_id="H25",
+                    location="mirror_window.py:_persist_geometry:after_emit_region_updated",
+                    message="region_updated_emit_returned",
+                    data={
+                        "region_id": str(self._region.id),
+                        "has_geometry": self._region.geometry is not None,
+                    },
+                )
+                # endregion
 
     def changeEvent(self, event: QEvent) -> None:
         # Nothing to do; kept for future hooks (active-window gradient, etc.).

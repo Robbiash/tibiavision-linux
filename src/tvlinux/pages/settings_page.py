@@ -45,8 +45,7 @@ class SettingsPage(QWidget):
 
     hud_visibility_requested = Signal(bool)
     open_hud_layout_editor_requested = Signal()
-    # Emits "floating", "companion" or "both". See
-    # :data:`PLACEMENT_CHOICES` for what the app does with each.
+    # Emits the currently selected mirror placement key.
     mirror_placement_changed = Signal(str)
 
     def __init__(
@@ -95,6 +94,37 @@ class SettingsPage(QWidget):
         content_row.addStretch(1)
 
         scroll.setWidget(content)
+
+        # --- Overlay engine (diagnostic) --------------------------------
+        # Shows which always-on-top mechanism is currently in effect so
+        # the user can self-report in bug threads instead of us having
+        # to ask them to run the app from a terminal and read logs.
+        # Populated by :meth:`set_overlay_backend`; hidden until the
+        # Application wiring tells us which backend was chosen.
+        overlay_card = card(inner, compact=True)
+        ol = overlay_card.body_layout
+        ol.addWidget(section_label("OVERLAY ENGINE", overlay_card))
+        self._lbl_overlay_backend = QLabel("Overlay mode: detecting...", overlay_card)
+        self._lbl_overlay_backend.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        ol.addWidget(self._lbl_overlay_backend)
+        ol.addWidget(
+            muted_label(
+                "XWayland (override-redirect) is the default and the most "
+                "reliable: mirrors are bypass-WM X11 windows, which KWin and "
+                "Mutter cannot re-stack below a fullscreen / focused Tibia. "
+                "Wayland (layer-shell) is an opt-in via --force-wayland for "
+                "systems with a matching layer-shell-qt install. Wayland "
+                "(best-effort) is the fallback when layer-shell-qt fails to "
+                "load -- stacking is then a compositor hint and may lose "
+                "the race against Tibia.",
+                overlay_card,
+            )
+        )
+        self._overlay_card = overlay_card
+        overlay_card.hide()
+        outer.addWidget(overlay_card)
 
         # --- Hunt Mode master ------------------------------------------
         master = card(inner, compact=True)
@@ -170,10 +200,9 @@ class SettingsPage(QWidget):
         pc.addWidget(section_label("MIRROR PLACEMENT", placement_card))
         pc.addWidget(
             muted_label(
-                "Choose where region previews appear. Wayland + GNOME refuse "
-                "to draw overlays above a fullscreen window, so switch to "
-                "Companion view if Tibia is running in Fullscreen mode -- "
-                "the regions will show as live tiles inside this app.",
+                "Floating mirrors are the supported placement mode. "
+                "Regions stay as click-through overlays above the game "
+                "when locked.",
                 placement_card,
             )
         )
@@ -185,11 +214,7 @@ class SettingsPage(QWidget):
         placement_row.addWidget(placement_label)
         self._cmb_placement = QComboBox(placement_card)
         self._cmb_placement.setAccessibleName("Mirror placement selector")
-        self._cmb_placement.setToolTip(
-            "Floating: classic click-through mirrors above the game. "
-            "Companion: live tiles inside this window (works with fullscreen Tibia). "
-            "Both: show each region in both places."
-        )
+        self._cmb_placement.setToolTip("Floating: classic click-through mirrors above the game.")
         for key, label in PLACEMENT_CHOICES:
             self._cmb_placement.addItem(label, key)
         current = load_mirror_placement()
@@ -212,8 +237,21 @@ class SettingsPage(QWidget):
         self._chk_hud.setChecked(visible)
         self._chk_hud.blockSignals(False)
 
+    def set_overlay_backend(self, label: str) -> None:
+        """Populate the "Overlay engine" info card.
+
+        Safe to call multiple times. An empty ``label`` hides the
+        card (useful for tests that don't route through ``__main__``).
+        """
+        text = (label or "").strip()
+        if not text:
+            self._overlay_card.hide()
+            return
+        self._lbl_overlay_backend.setText(f"Overlay mode: {text}")
+        self._overlay_card.show()
+
     def current_mirror_placement(self) -> str:
-        """Return the current placement mode key (``floating``/``companion``/``both``)."""
+        """Return the current placement mode key."""
         data = self._cmb_placement.currentData()
         return str(data) if data in _PLACEMENT_KEYS else "floating"
 
@@ -242,8 +280,6 @@ class SettingsPage(QWidget):
 # :mod:`tvlinux.app` when honoring the persisted value on launch.
 PLACEMENT_CHOICES: list[tuple[str, str]] = [
     ("floating", "Floating mirrors (default)"),
-    ("companion", "Companion view only (works with fullscreen Tibia)"),
-    ("both", "Both floating mirrors and companion view"),
 ]
 _PLACEMENT_KEYS = {key for key, _ in PLACEMENT_CHOICES}
 _PLACEMENT_SETTINGS_KEY = "ui/mirror_placement"

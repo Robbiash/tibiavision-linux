@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 from PySide6.QtCore import QObject, QRect, Signal
 
 WatchMode = Literal["off", "change"]
+CooldownSpell = Literal["off", "exori_gran", "executors_throw"]
 
 
 @dataclass
@@ -44,6 +45,13 @@ class Region:
     border_color: str = "#0f8fbf"
     corner_radius: int = 12
     track_cooldown: bool = False
+    # Spell-specific cooldown tracker profile. "off" disables the feature.
+    # The two shipped presets map to the user's request:
+    #   - exori_gran: 6s base cooldown, 2s proc compensation support.
+    #   - executors_throw: 10s base cooldown.
+    cooldown_spell: CooldownSpell = "off"
+    # Remaining-seconds threshold at which the mirror border should blink.
+    cooldown_alert_s: float = 1.9
     # Pixel-watchdog mode. ``"off"`` = ignore, ``"change"`` = emit a
     # ``PIXEL_WATCH_CHANGED`` event whenever the region's captured pixels
     # change (see :class:`tvlinux.analyzers.pixel_watch.PixelWatchAnalyzer`).
@@ -59,6 +67,13 @@ class Region:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Region:
+        spell = _coerce_cooldown_spell(data.get("cooldown_spell"))
+        # Back-compat: older profiles only had track_cooldown(bool). If that
+        # legacy flag is true and no explicit spell exists, default to the
+        # original intended use-case (Exori Gran).
+        legacy_track = bool(data.get("track_cooldown", False))
+        if spell == "off" and legacy_track:
+            spell = "exori_gran"
         return cls(
             id=UUID(data["id"]) if data.get("id") else uuid4(),
             name=str(data.get("name", "Region")),
@@ -73,7 +88,9 @@ class Region:
             geometry=_list_to_rect(data.get("geometry")),
             border_color=str(data.get("border_color", "#0f8fbf")),
             corner_radius=int(data.get("corner_radius", 12)),
-            track_cooldown=bool(data.get("track_cooldown", False)),
+            track_cooldown=legacy_track or spell != "off",
+            cooldown_spell=spell,
+            cooldown_alert_s=float(data.get("cooldown_alert_s", 1.9)),
             watch_mode=_coerce_watch_mode(data.get("watch_mode")),
         )
 
@@ -91,6 +108,14 @@ def _coerce_watch_mode(v: Any) -> WatchMode:
     """
     if v == "change":
         return "change"
+    return "off"
+
+
+def _coerce_cooldown_spell(v: Any) -> CooldownSpell:
+    if v == "exori_gran":
+        return "exori_gran"
+    if v == "executors_throw":
+        return "executors_throw"
     return "off"
 
 

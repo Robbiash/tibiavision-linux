@@ -50,13 +50,14 @@ from .motion import cross_fade, hover_ease, lerp, pulse, stop_pulse
 from .pages import (
     AboutPage,
     AudioTimersPage,
-    CompanionPage,
     HuntHistoryPage,
+    QuestBrowserPage,
     RegionsPage,
     SettingsPage,
 )
 from .regions import RegionManager
 from .theme import TOKENS
+from .tibia_reborn_server import TibiaRebornServer
 from .ui_helpers import default_icon_size, hline, icon, muted_label, pill_button
 
 # -- Page registry -----------------------------------------------------------
@@ -65,13 +66,9 @@ from .ui_helpers import default_icon_size, hline, icon, muted_label, pill_button
 PAGES: list[tuple[str, str, str]] = [
     # (key, label, subtitle)
     ("regions", "Regions", "Manage capture regions, colors, and behaviour."),
-    (
-        "companion",
-        "Companion",
-        "In-app live tiles for every region. Works when Tibia is fullscreen.",
-    ),
     ("hunt_history", "Hunt History", "Past hunts, loot split, notes."),
     ("audio_timers", "Audio Timers", "Countdown timers with sounds + global hotkeys."),
+    ("quest_browser", "Quest Browser", "Quest guides, boss tips, and party finder."),
     ("settings", "Settings", "Hunt Mode master switch and capture behaviour."),
     ("about", "About", "What this app is and isn't."),
 ]
@@ -149,6 +146,7 @@ class NavRail(QWidget):
             "regions": "layers",
             "hunt_history": "line-chart",
             "audio_timers": "volume-2",
+            "quest_browser": "globe",
             "settings": "settings",
             "about": "info",
         }
@@ -515,6 +513,7 @@ class ShellWindow(QMainWindow):
     border_color_requested = Signal(UUID, str)
     corner_radius_requested = Signal(UUID, int)
     toggle_track_cooldown_requested = Signal(UUID, bool)
+    cooldown_spell_requested = Signal(UUID, str)
     toggle_watch_mode_requested = Signal(UUID, str)
     show_all_requested = Signal(bool)
     lock_all_requested = Signal(bool)
@@ -539,6 +538,7 @@ class ShellWindow(QMainWindow):
         hunt_mode: HuntModeManager,
         audio_timers: AudioTimerManager,
         hunt_history: HuntHistoryStore,
+        reborn_server: TibiaRebornServer | None = None,
         parent: QWidget | None = None,
         *,
         hud_visible: bool = True,
@@ -552,7 +552,13 @@ class ShellWindow(QMainWindow):
         self.setMinimumSize(880, 560)
 
         self._build_chrome(hunt_mode)
-        self._build_pages(hunt_mode, audio_timers, hunt_history, hud_visible=hud_visible)
+        self._build_pages(
+            hunt_mode,
+            audio_timers,
+            hunt_history,
+            reborn_server=reborn_server,
+            hud_visible=hud_visible,
+        )
         self._build_header_actions()
         self.nav.set_current("regions")
         self._on_nav("regions")
@@ -608,13 +614,15 @@ class ShellWindow(QMainWindow):
         hunt_mode: HuntModeManager,
         audio_timers: AudioTimerManager,
         hunt_history: HuntHistoryStore,
+        reborn_server: TibiaRebornServer | None = None,
         *,
         hud_visible: bool = True,
     ) -> None:
         self.regions_page = RegionsPage(self._regions, self)
-        self.companion_page = CompanionPage(self._regions, self)
         self.hunt_history_page = HuntHistoryPage(hunt_history, self)
         self.audio_timers_page = AudioTimersPage(audio_timers, self)
+        server = reborn_server or TibiaRebornServer(self)
+        self.quest_browser_page = QuestBrowserPage(server, self)
         self.settings_page = SettingsPage(hunt_mode, self, hud_visible=hud_visible)
         self.settings_page.hud_visibility_requested.connect(self.hud_visibility_requested)
         self.settings_page.open_hud_layout_editor_requested.connect(
@@ -625,9 +633,9 @@ class ShellWindow(QMainWindow):
 
         self.pages_by_key: dict[str, QWidget] = {
             "regions": self.regions_page,
-            "companion": self.companion_page,
             "hunt_history": self.hunt_history_page,
             "audio_timers": self.audio_timers_page,
+            "quest_browser": self.quest_browser_page,
             "settings": self.settings_page,
             "about": self.about_page,
         }
@@ -648,6 +656,7 @@ class ShellWindow(QMainWindow):
         rp.border_color_requested.connect(self.border_color_requested)
         rp.corner_radius_requested.connect(self.corner_radius_requested)
         rp.toggle_track_cooldown_requested.connect(self.toggle_track_cooldown_requested)
+        rp.cooldown_spell_requested.connect(self.cooldown_spell_requested)
         rp.toggle_watch_mode_requested.connect(self.toggle_watch_mode_requested)
         rp.show_all_requested.connect(self.show_all_requested)
         rp.lock_all_requested.connect(self.lock_all_requested)
@@ -766,6 +775,10 @@ class ShellWindow(QMainWindow):
     def set_hud_visible(self, visible: bool) -> None:
         """Sync the Settings page checkbox with tray-menu HUD toggles."""
         self.settings_page.set_hud_visible(visible)
+
+    def set_overlay_backend(self, label: str) -> None:
+        """Show the current overlay engine on the Settings page."""
+        self.settings_page.set_overlay_backend(label)
 
     # Below this window width the shell switches into a more compact
     # layout (slimmer nav rail, tighter header margins). Chosen so that
