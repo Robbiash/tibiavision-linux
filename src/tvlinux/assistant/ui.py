@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -101,6 +102,10 @@ class AssistantWindow(QMainWindow):
     """Main window: chat, memory management, and voice controls."""
 
     reply_ready = Signal(str)
+    # Emitted per complete sentence as Grok streams its response. Lets us
+    # start TTS for sentence 1 while Grok is still generating sentence 2,3,4.
+    # Cuts perceived latency from ~2-3s to ~700ms-1s before bot starts talking.
+    sentence_ready = Signal(str)
     error_reported = Signal(str)
     transcript_ready = Signal(str)
 
@@ -129,7 +134,11 @@ class AssistantWindow(QMainWindow):
         # spiral: she TTSes → leftover transcript arrives → Grok →
         # more TTS → forever.
         self._sysaudio_cooldown_until = 0.0
-        self._sysaudio_post_tts_cooldown_s = 5.0
+        self._sysaudio_post_tts_cooldown_s = 2.0
+        # When user barges in with "stop" / "shut up", we cancel her TTS
+        # and want to immediately accept new input — set this flag so
+        # _on_tts_busy_changed(False) doesn't re-arm the post-TTS cooldown.
+        self._sysaudio_abort_in_progress = False
         self._oracle = QuestOracle()
         self._active_quest: QuestMatch | None = None
 
@@ -369,18 +378,18 @@ class AssistantWindow(QMainWindow):
         self._sysaudio.heard_text.connect(self._on_sysaudio_heard_text)
         self._sysaudio_mic.status_changed.connect(self._on_discord_status_changed)
         self._sysaudio_mic.heard_text.connect(self._on_sysaudio_heard_text)
-        # Pause both capture sources while the bot is talking. Monitor
-        # would loop her TTS back in; mic doesn't loop but pausing during
-        # TTS keeps response handling strictly turn-based for MVP. We'll
-        # revisit when we add interruption / barge-in support.
+        # Pause MONITOR capture during TTS — would otherwise loop her own
+        # voice back into Whisper. MIC capture stays active so the user
+        # can interrupt with an abort phrase ("stop", "shut up", etc.) —
+        # the mic source never carries her TTS, so no feedback risk.
         self._discord.tts_busy_changed.connect(self._sysaudio.set_paused)
-        self._discord.tts_busy_changed.connect(self._sysaudio_mic.set_paused)
-        # Also bump a cooldown timestamp when TTS ends — chunks that were
+        # Bump a cooldown timestamp when TTS ends — chunks that were
         # already submitted to Whisper before the pause kicked in can come
         # back as transcripts seconds later and would re-trigger her.
         self._discord.tts_busy_changed.connect(self._on_tts_busy_changed)
 
         self.reply_ready.connect(self._on_reply_ready)
+        self.sentence_ready.connect(self._on_sentence_ready)
         self.error_reported.connect(self._on_error_reported)
         self.transcript_ready.connect(self._on_transcript_ready)
 
@@ -600,65 +609,51 @@ class AssistantWindow(QMainWindow):
         )
 
         def worker() -> None:
+            # Streaming Grok: as tokens arrive, accumulate into a sentence
+            # buffer; each completed sentence fires sentence_ready which
+            # pipes into discord.speak_in_call (serialized via TTS lock).
+            # Bot starts speaking sentence 1 while Grok is still generating
+            # sentences 2-N. Big latency win over the old triple-pass
+            # synchronous chat() + rewrite + maybe second_pass pattern.
+            streamer = _SentenceStreamer(on_sentence=lambda s: self.sentence_ready.emit(s))
             try:
-                response = self._client.chat(
+                response = self._client.chat_stream(
                     system_prompt=system_prompt,
                     messages=model_messages,
+                    on_chunk=streamer.feed,
                     temperature=1.45,
                     top_p=0.97,
                 )
-                rewritten = self._client.chat(
-                    system_prompt=_SOFT_REPLY_REWRITE_PROMPT,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": (
-                                "Original user request:\n"
-                                f"{model_text}\n\n"
-                                "Draft assistant reply:\n"
-                                f"{response}\n\n"
-                                "Rewrite now in Unhinged 18+ style while keeping the same meaning."
-                            ),
-                        }
-                    ],
-                    temperature=1.35,
-                    top_p=0.96,
-                )
-                if rewritten.strip():
-                    response = rewritten.strip()
-                if _looks_soft_reply(response):
-                    second_pass = self._client.chat(
-                        system_prompt=_SOFT_REPLY_REWRITE_PROMPT,
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": (
-                                    "The rewrite is still too soft. Make it harsher, darker, and more sardonic.\n\n"
-                                    f"{response}"
-                                ),
-                            }
-                        ],
-                        temperature=1.45,
-                        top_p=0.97,
-                    )
-                    if second_pass.strip():
-                        response = second_pass.strip()
+                streamer.flush()
             except Exception as exc:
                 self.error_reported.emit(str(exc))
                 return
             self.reply_ready.emit(response)
 
-        threading.Thread(target=worker, name="assistant-chat", daemon=True).start()
+        threading.Thread(target=worker, name="assistant-chat-stream", daemon=True).start()
+
+    def _on_sentence_ready(self, sentence: str) -> None:
+        """Streaming hook: each completed sentence from Grok pipes into the
+        TTS layer immediately so the bot can start talking before the full
+        response has generated. The TTS lock in _play_tts serializes the
+        playback so sentences come out in order."""
+        cleaned = sentence.strip()
+        if not cleaned:
+            return
+        discord_speak_live = self._discord_speak_back.isChecked() and self._discord.running
+        if discord_speak_live:
+            self._discord.speak_in_call(cleaned)
+        elif self._read_aloud.isChecked():
+            self._speaker.speak(cleaned)
 
     def _on_reply_ready(self, reply: str) -> None:
+        # Full text has finished streaming. TTS for each sentence was
+        # already queued via _on_sentence_ready; just finalize the chat
+        # log + memory store + busy state here. We deliberately DO NOT
+        # re-speak the full reply since sentences are already being played.
         self._set_busy(False, "Ready.")
         self._append_chat_line("Assistant", reply)
         self._store.append_message("assistant", reply)
-        discord_speak_live = self._discord_speak_back.isChecked() and self._discord.running
-        if self._read_aloud.isChecked() and not discord_speak_live:
-            self._speaker.speak(reply)
-        if discord_speak_live:
-            self._discord.speak_in_call(reply)
         if self._pending_discord_inputs and self._discord_auto_listen.isChecked():
             QTimer.singleShot(0, self._process_next_discord_pending)
 
@@ -793,6 +788,10 @@ class AssistantWindow(QMainWindow):
             # so any in-flight Whisper job that finishes mid-TTS is also
             # rejected by the cooldown gate.
             self._sysaudio_cooldown_until = time.monotonic() + 3600.0
+        elif self._sysaudio_abort_in_progress:
+            # User barged in — let them speak again instantly.
+            self._sysaudio_cooldown_until = 0.0
+            self._sysaudio_abort_in_progress = False
         else:
             self._sysaudio_cooldown_until = time.monotonic() + self._sysaudio_post_tts_cooldown_s
 
@@ -808,6 +807,20 @@ class AssistantWindow(QMainWindow):
             return
         cleaned = transcript.strip()
         if not cleaned:
+            return
+        # Barge-in: abort phrases bypass every other gate. Only accept them
+        # from the user's mic (label "me") so the bot's own TTS coming back
+        # through monitor capture can't abort itself.
+        if speaker == "me" and _is_abort_phrase(cleaned):
+            aborted = self._discord.cancel_speech()
+            self._sysaudio_abort_in_progress = aborted
+            self._sysaudio_cooldown_until = 0.0
+            self.statusBar().showMessage(
+                f"Abort phrase heard: '{cleaned}' — speech halted."
+                if aborted
+                else f"Abort phrase heard: '{cleaned}' (no speech in progress).",
+                2500,
+            )
             return
         # Junk filter: Whisper hallucinates single words like "you", "thanks",
         # "okay" from random noise, music, ad tails. Demand at least 2 words
@@ -866,6 +879,13 @@ class AssistantWindow(QMainWindow):
                 if self._discord_speak_back.isChecked() and self._discord.running:
                     self._discord.speak_in_call(ack)
             return
+
+        # Detect quest mention — pulls real quest/boss data from tibia-reborn
+        # into the system prompt so she stops hallucinating Tibia lore.
+        detected = self._oracle.search(cleaned)
+        if detected is not None:
+            self._active_quest = detected
+            self.statusBar().showMessage(f"Quest detected: {detected.name}", 3000)
 
         if not self._busy:
             self._submit_prompt(
@@ -1070,6 +1090,74 @@ def _looks_like_discord_bot_token(token: str) -> bool:
         stripped = stripped[4:].strip()
     # Discord bot tokens have 3 dot-separated segments.
     return stripped.count(".") == 2 and len(stripped) >= 40
+
+
+# Sentence boundary: a period/exclam/question (one or more) optionally
+# followed by closing quote or paren, then whitespace. Lookbehind blocks
+# matches on digit-decimals like "3.14" so we don't break sentences inside
+# numeric literals or version strings.
+_SENTENCE_END_RE = re.compile(r"(?<![0-9])[.!?]+[\"')\]]*\s+")
+# A sentence shorter than this many characters won't be flushed to TTS —
+# instead we wait for more tokens to arrive. Avoids one-word/two-word
+# micro-emissions that make playback choppy ("Yeah." → "Right.").
+_SENTENCE_MIN_CHARS = 25
+
+
+class _SentenceStreamer:
+    """Buffer Grok streaming tokens, emit one completed sentence at a time."""
+
+    def __init__(self, on_sentence: Callable[[str], None]) -> None:
+        self._buf = ""
+        self._on_sentence = on_sentence
+
+    def feed(self, chunk: str) -> None:
+        self._buf += chunk
+        while True:
+            # Find the FIRST sentence-end whose accumulated text reaches the
+            # min-char gate. If only short sentences exist so far ("Yeah.")
+            # we batch them with later content rather than emit choppy
+            # micro-utterances.
+            emit_end = -1
+            for match in _SENTENCE_END_RE.finditer(self._buf):
+                candidate = self._buf[: match.end()].strip()
+                if len(candidate) >= _SENTENCE_MIN_CHARS:
+                    emit_end = match.end()
+                    break
+            if emit_end < 0:
+                # No batchable sentence found — wait for more tokens.
+                return
+            self._on_sentence(self._buf[:emit_end].strip())
+            self._buf = self._buf[emit_end:]
+
+    def flush(self) -> None:
+        """Emit any leftover at end-of-stream (final sentence without trailing space)."""
+        tail = self._buf.strip()
+        if tail:
+            self._on_sentence(tail)
+            self._buf = ""
+
+
+# Abort-phrase pattern. Matches "stop", "shut up", "shut it", "quiet",
+# "be quiet", optionally with "svetlana" / "ok" prefix. Used by the
+# sysaudio barge-in path to halt the bot's TTS mid-sentence.
+_ABORT_PHRASE_RE = re.compile(
+    r"(?i)\b(?:(?:ok(?:ay)?|hey|yo|svetlana)[, ]+)*"
+    r"(?:shut\s*(?:up|it)|stop(?:\s+(?:talking|svetlana))?|be\s+quiet|quiet|"
+    r"nevermind|never\s+mind|halt)\b"
+)
+
+
+def _is_abort_phrase(text: str) -> bool:
+    """Return True if `text` is a short, clearly intentional abort command.
+
+    Guards against false positives by also requiring the utterance to be
+    short (< 6 words) — "stop pulling that lever" shouldn't abort her.
+    """
+    if not text:
+        return False
+    if len(text.split()) > 4:
+        return False
+    return bool(_ABORT_PHRASE_RE.search(text))
 
 
 def _strip_wake_word_mentions(text: str, wake_word: str) -> str:

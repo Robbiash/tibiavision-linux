@@ -101,12 +101,14 @@ class SystemAudioListener(QObject):
         self._device_override = device
         self._source_label = source_label
 
-        # Env-tunable knobs. Defaults mirror DiscordVoiceLayer so behavior
-        # is predictable across audio sources.
-        self._voice_threshold = int(os.environ.get("TVASSIST_SYSAUDIO_VAD_THRESHOLD", "120"))
+        # Env-tunable knobs. Defaults tuned higher than DiscordVoiceLayer
+        # because system-audio capture picks up the user's keyboard +
+        # mouse clicks (~peak 120-200) which kept triggering Whisper for
+        # nothing. Real speech peaks well above 1000.
+        self._voice_threshold = int(os.environ.get("TVASSIST_SYSAUDIO_VAD_THRESHOLD", "400"))
         self._silence_seconds = float(os.environ.get("TVASSIST_SYSAUDIO_SILENCE_S", "0.45"))
         self._min_utterance_seconds = float(
-            os.environ.get("TVASSIST_SYSAUDIO_MIN_UTTERANCE_S", "0.22")
+            os.environ.get("TVASSIST_SYSAUDIO_MIN_UTTERANCE_S", "0.4")
         )
         self._max_utterance_seconds = float(
             os.environ.get("TVASSIST_SYSAUDIO_MAX_UTTERANCE_S", "12.0")

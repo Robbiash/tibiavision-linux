@@ -303,6 +303,21 @@ class DiscordVoiceLayer(QObject):
             return
         self._run_coro_threadsafe(self._play_tts(cleaned))
 
+    def cancel_speech(self) -> bool:
+        """Halt any in-flight TTS playback. Returns True if something was actively
+        speaking. Called by the barge-in path when the user says 'stop' / 'shut up'
+        into their mic during the bot's TTS."""
+        vc = self._voice_client
+        if vc is None or not vc.is_connected():
+            return False
+        if not vc.is_playing():
+            return False
+        with contextlib.suppress(Exception):
+            vc.stop()  # invokes the after-callback with no exception, which
+            # naturally fires tts_busy_changed(False) and unpauses sysaudio.
+        self.status_changed.emit("Speech aborted on user request.")
+        return True
+
     def join_call(self, *, token: str, channel_id: int) -> None:
         """Start Discord client if needed, then join/move into `channel_id`."""
         if not self.available:

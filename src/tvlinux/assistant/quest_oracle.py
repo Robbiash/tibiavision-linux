@@ -39,7 +39,8 @@ def _resolve_path(env_key: str, *subpath: str) -> Path:
 # ---------------------------------------------------------------------------
 
 _NOISE_RE = re.compile(r"[^a-z0-9\s]")
-_QUEST_STOPWORDS = {
+# Stopwords applied to both quest/boss titles AND user queries.
+_TITLE_STOPWORDS = {
     "a",
     "an",
     "the",
@@ -67,12 +68,77 @@ _QUEST_STOPWORDS = {
     "doing",
     "start",
     "begin",
+    # Game name and ubiquitous chat fillers — too generic to anchor a
+    # quest/boss match. Without these, "tell me about Bakragore on Tibia"
+    # would false-match "Measuring Tibia Quest" purely on the word "tibia".
+    "tibia",
+    "boss",
+    "tell",
+    "about",
+    "hey",
+    "okay",
+    "ok",
+    "svetlana",
+    "yo",
+    "go",
+    "first",
+    "should",
+    "think",
+    "know",
+    "gonna",
+    "going",
+    "am",
+    "is",
+    "are",
+    "can",
+    "you",
+    "have",
+    "got",
 }
 
+# Additional stopwords for USER QUERIES only — words that show up in voice
+# transcripts as filler but are real content words in quest/boss titles.
+# Without this, "I am the knight" would false-match "Black Knight Quest".
+_QUERY_ONLY_STOPWORDS = {
+    # Vocations / role mentions
+    "knight",
+    "paladin",
+    "druid",
+    "sorcerer",
+    "mage",
+    "monk",
+    "ek",
+    "rp",
+    "ed",
+    "ms",
+    "rip",
+    # Question / context fillers common in spoken queries
+    "what",
+    "where",
+    "when",
+    "which",
+    "who",
+    "say",
+    "saying",
+    "said",
+    "level",  # often "I am level X" not part of a boss name
+    "next",
+    "this",
+    "that",
+    "thing",
+    "stuff",
+    "guys",
+    "bro",
+    "dude",
+    "please",
+}
+_ALL_QUERY_STOPWORDS = _TITLE_STOPWORDS | _QUERY_ONLY_STOPWORDS
 
-def _tokenize(text: str) -> frozenset[str]:
+
+def _tokenize(text: str, *, is_title: bool = False) -> frozenset[str]:
     clean = _NOISE_RE.sub(" ", text.lower())
-    return frozenset(t for t in clean.split() if t and t not in _QUEST_STOPWORDS)
+    stopwords = _TITLE_STOPWORDS if is_title else _ALL_QUERY_STOPWORDS
+    return frozenset(t for t in clean.split() if t and t not in stopwords)
 
 
 def _prefix_overlap(query_tokens: frozenset[str], title_tokens: frozenset[str]) -> float:
@@ -88,12 +154,36 @@ def _prefix_overlap(query_tokens: frozenset[str], title_tokens: frozenset[str]) 
     return count
 
 
+def _fuzzy_overlap(query_tokens: frozenset[str], title_tokens: frozenset[str]) -> float:
+    """Partial credit for near-misses — handles Whisper-grade misspellings like
+    'bakregore' → 'bakragore', 'magmar' → 'magma'. Uses difflib edit-distance ratio.
+    """
+    from difflib import SequenceMatcher
+
+    already = query_tokens & title_tokens
+    count = 0.0
+    for qt in query_tokens:
+        if len(qt) < 5 or qt in already:
+            continue
+        best_ratio = 0.0
+        for tt in title_tokens:
+            if len(tt) < 5 or tt in already:
+                continue
+            r = SequenceMatcher(None, qt, tt).ratio()
+            if r > best_ratio:
+                best_ratio = r
+        if best_ratio >= 0.78:  # close enough to count as same word
+            count += 0.7 * best_ratio
+    return count
+
+
 def _match_score(query_tokens: frozenset[str], title_tokens: frozenset[str]) -> float:
     if not query_tokens or not title_tokens:
         return 0.0
     exact = len(query_tokens & title_tokens)
     fuzzy = _prefix_overlap(query_tokens, title_tokens)
-    overlap = exact + fuzzy
+    misspell = _fuzzy_overlap(query_tokens, title_tokens)
+    overlap = exact + fuzzy + misspell
     if overlap == 0:
         return 0.0
     precision = overlap / len(query_tokens)
@@ -132,7 +222,10 @@ class QuestMatch:
 class QuestOracle:
     """Load and search Tibia quest data from tibia-reborn content files."""
 
-    _MIN_SCORE = 0.35
+    # Voice transcripts are noisy (filler words, vocations, "I should",
+    # "what about", etc.) which dilutes precision. Lower threshold than
+    # the original text-input default so real queries still hit.
+    _MIN_SCORE = 0.20
 
     def __init__(
         self,
@@ -155,6 +248,11 @@ class QuestOracle:
         # In-memory index: list of (token_set, slug, title) for the 50 priority guides
         self._guide_index: list[tuple[frozenset[str], str, str]] = []
         self._load_guide_index()
+        # Separate index for stand-alone boss insights (no quest wrapper),
+        # so the user can ask about a boss by name and get the raw boss
+        # mechanics markdown injected as quest_context.
+        self._boss_index: list[tuple[frozenset[str], str, str]] = []
+        self._load_boss_index()
 
     def _load_guide_index(self) -> None:
         if not self._guides_dir.exists():
@@ -164,34 +262,84 @@ class QuestOracle:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 title = data.get("title") or path.stem.replace("-", " ")
                 # Always use path.stem as slug — it's guaranteed to match the filename on disk.
-                self._guide_index.append((_tokenize(title), path.stem, title))
+                self._guide_index.append((_tokenize(title, is_title=True), path.stem, title))
             except Exception:
                 pass
+
+    def _load_boss_index(self) -> None:
+        if not self._boss_dir.exists():
+            return
+        for path in self._boss_dir.glob("*.md"):
+            # Skip the README so we don't fuzzy-match user queries against it.
+            if path.stem.lower() == "readme":
+                continue
+            display_name = path.stem.replace("-", " ").replace("_", " ")
+            self._boss_index.append(
+                (_tokenize(display_name, is_title=True), path.stem, display_name)
+            )
 
     # -- Public API -----------------------------------------------------------
 
     def search(self, query: str) -> QuestMatch | None:
-        """Return the best-matching quest for a natural-language query, or None."""
+        """Return the best-matching quest or boss for a natural-language query."""
         query_tokens = _tokenize(query)
         if not query_tokens:
             return None
 
-        best_score = 0.0
-        best_slug = ""
-        best_title = ""
-
+        # Search quest guides
+        best_quest_score = 0.0
+        best_quest_slug = ""
+        best_quest_title = ""
         for title_tokens, slug, title in self._guide_index:
             score = _match_score(query_tokens, title_tokens)
-            if score > best_score:
-                best_score = score
-                best_slug = slug
-                best_title = title
+            if score > best_quest_score:
+                best_quest_score = score
+                best_quest_slug = slug
+                best_quest_title = title
 
-        if best_score >= self._MIN_SCORE and best_slug:
-            return self._load_guide(best_slug, best_title)
+        # Search boss insights (so "tell me about Bakragore" hits Bakragore.md
+        # even though Bakragore isn't a quest-guide entry).
+        best_boss_score = 0.0
+        best_boss_slug = ""
+        best_boss_title = ""
+        for title_tokens, slug, title in self._boss_index:
+            score = _match_score(query_tokens, title_tokens)
+            if score > best_boss_score:
+                best_boss_score = score
+                best_boss_slug = slug
+                best_boss_title = title
+
+        # Pick whichever scored higher above threshold.
+        if best_quest_score >= self._MIN_SCORE or best_boss_score >= self._MIN_SCORE:
+            if best_quest_score >= best_boss_score and best_quest_score >= self._MIN_SCORE:
+                return self._load_guide(best_quest_slug, best_quest_title)
+            if best_boss_score >= self._MIN_SCORE:
+                return self._build_boss_match(best_boss_slug, best_boss_title)
 
         # Fall back to SQLite fuzzy search for quests not in the priority 50
         return self._search_db(query_tokens)
+
+    def _build_boss_match(self, slug: str, display_name: str) -> QuestMatch | None:
+        """Build a QuestMatch from just a boss insights .md file (no quest wrapper)."""
+        insights = self._load_boss_insights(slug)
+        if not insights:
+            return None
+        return QuestMatch(
+            name=display_name,
+            slug=slug,
+            location="",
+            level_required=0,
+            level_recommended=0,
+            summary="",
+            quick_facts={},
+            prerequisites=[],
+            fast_path=[],
+            key_items=[],
+            key_npcs=[],
+            warnings=[],
+            boss_insights=insights,
+            source="boss_md",
+        )
 
     def format_context(self, match: QuestMatch) -> str:
         """Render a quest match as a compact context block for Svetlana's system prompt."""

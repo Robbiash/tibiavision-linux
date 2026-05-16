@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -109,6 +109,91 @@ class XAIClient:
         if not isinstance(message, dict):
             raise XAIError(f"xAI response did not contain a message object: {data!r}")
         return _extract_content(message.get("content"))
+
+    def chat_stream(
+        self,
+        *,
+        system_prompt: str,
+        messages: Sequence[dict[str, str]],
+        on_chunk: Callable[[str], None],
+        temperature: float = 0.9,
+        top_p: float = 1.0,
+    ) -> str:
+        """Streaming version of chat(). Invokes on_chunk(text) per content delta
+        as tokens arrive from xAI via SSE. Returns the complete assistant text.
+
+        Lets the caller pipeline TTS / UI updates per chunk instead of waiting
+        for the full response. The bot can start speaking the first sentence
+        of a reply ~700ms after the user finishes talking, instead of 2-3s.
+        """
+        if not self.configured:
+            raise XAIError(
+                "Missing xAI API key. Set XAI_API_KEY or enter it in the app connection panel."
+            )
+        payload_messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
+        for item in messages:
+            role = str(item.get("role", "")).strip()
+            content = str(item.get("content", "")).strip()
+            if role not in {"system", "user", "assistant"} or not content:
+                continue
+            payload_messages.append({"role": role, "content": content})
+
+        if len(payload_messages) <= 1:
+            raise XAIError("No valid conversation messages were supplied.")
+
+        payload = {
+            "model": self.model,
+            "messages": payload_messages,
+            "temperature": max(0.0, min(1.5, float(temperature))),
+            "top_p": max(0.05, min(1.0, float(top_p))),
+            "stream": True,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        request = Request(
+            url=f"{self.base_url.rstrip('/')}/chat/completions",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
+        )
+
+        accumulated: list[str] = []
+        try:
+            with urlopen(request, timeout=self.timeout_s) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:") :].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+                    if not isinstance(delta, dict):
+                        continue
+                    delta_content = delta.get("content")
+                    if isinstance(delta_content, str) and delta_content:
+                        accumulated.append(delta_content)
+                        on_chunk(delta_content)
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+            raise XAIError(f"xAI API error ({exc.code}): {detail or exc.reason}") from exc
+        except URLError as exc:
+            raise XAIError(f"Network error while calling xAI: {exc.reason}") from exc
+
+        full = "".join(accumulated).strip()
+        if not full:
+            raise XAIError("xAI returned an empty streamed response.")
+        return full
 
     def _post_json(self, endpoint: str, payload: dict[str, Any]) -> str:
         body = json.dumps(payload).encode("utf-8")
