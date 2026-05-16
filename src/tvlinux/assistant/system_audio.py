@@ -29,6 +29,7 @@ Requires:
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import subprocess
 import sys
@@ -39,6 +40,8 @@ import wave
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal
@@ -51,6 +54,44 @@ _SAMPLE_WIDTH = 2
 _CHANNELS = 1
 _CHUNK_SAMPLES = 320  # 20 ms at 16 kHz
 _CHUNK_BYTES = _CHUNK_SAMPLES * _SAMPLE_WIDTH * _CHANNELS
+
+# Groq Whisper endpoint (OpenAI-compatible). Set GROQ_API_KEY in the env
+# (or via the UI) to route STT through Groq's LPU-accelerated Whisper-
+# large-v3 instead of local CPU small Whisper. ~10x more accurate and
+# usually faster, costs ~$0.04/hour of audio.
+_GROQ_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+# Default to whisper-large-v3-turbo — ~50% faster than large-v3 on
+# Groq's LPU, near-identical accuracy. Override with the env var if you
+# need the non-turbo model for any reason.
+_GROQ_MODEL = (
+    os.environ.get("TVASSIST_GROQ_WHISPER_MODEL", "whisper-large-v3-turbo").strip()
+    or "whisper-large-v3-turbo"
+)
+
+# Tibia keyword prime — biases Whisper toward our vocab so it stops
+# hallucinating "bakregore" / "lloyed" / "magmar bubble". Written as a
+# coherent sentence rather than a bare list because Whisper biases
+# better with grammatical context. Stays under Whisper's 224-token
+# initial_prompt limit.
+_TIBIA_INITIAL_PROMPT = (
+    "This is a Tibia voice call between Robin and Svetlana about quests, "
+    "hunts, and boss fights. Robin's character is Sydnee Sweeney, a level "
+    "1860 Elite Knight (EK). Bosses include Bakragore, Goshnar's Megalomania, "
+    "Goshnar's Cruelty, Goshnar's Greed, Goshnar's Hatred, Goshnar's Malice, "
+    "Goshnar's Spite, Lloyd, Magma Bubble, Drume, Faceless Bane, "
+    "Lady Tenebris, Grand Master Oberon, King Zelos, Scarlett Etzel, "
+    "The Rootkraken, Lord Retro, The Pale Count, Yselda, Kroazur, "
+    "Ferumbras, Morgaroth, Orshabaal, Ghazbaran, Zugurosh. "
+    "Vocations: Elite Knight (EK), Royal Paladin (RP), Elder Druid (ED), "
+    "Master Sorcerer (MS), Monk. Spells: exori, exori gran, exori mas, "
+    "exura sio, exevo gran mas vis, exevo gran mas flam, mas san, mas frigo, "
+    "exeta res, utura, utamo, exura gran. Items: Stone Skin Amulet (SSA), "
+    "Ultimate Healing Potion (UH), Great Spirit Potion (GSP), Greater Garlic "
+    "Necklace, Might Ring, Bullseye Potion, Mastermind Potion. Cities: "
+    "Thais, Carlin, Venore, Liberty Bay, Port Hope, Yalahar, Edron, "
+    "Ankrahmun, Darashia, Svargrond, Kazordoon. Content: Soul War, "
+    "Rotten Blood, Forgotten Knowledge, Cobra Bastion, Falcon Bastion."
+)
 
 
 def system_audio_available() -> tuple[bool, str]:
@@ -150,11 +191,25 @@ class SystemAudioListener(QObject):
         self._tts_tail_grace_seconds = float(
             os.environ.get("TVASSIST_SYSAUDIO_TTS_TAIL_GRACE_S", "0.6")
         )
+        # Optional cloud STT via Groq (Whisper-large-v3 on LPU). When set,
+        # we use the cloud endpoint instead of the local model — way more
+        # accurate (~95% vs ~85% on small) and usually faster than CPU.
+        # Resolved per-transcribe so updates from the UI take effect.
+        self._groq_api_key: str | None = os.environ.get("GROQ_API_KEY", "").strip() or None
 
     # ── Public control ───────────────────────────────────────────────────
 
     def is_listening(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
+
+    def set_groq_api_key(self, api_key: str) -> None:
+        """Update the Groq Whisper key at runtime (from the UI). Empty
+        string disables Groq and falls back to local Whisper."""
+        cleaned = api_key.strip()
+        self._groq_api_key = cleaned or None
+
+    def _resolve_groq_api_key(self) -> str | None:
+        return self._groq_api_key or os.environ.get("GROQ_API_KEY", "").strip() or None
 
     def set_paused(self, paused: bool) -> None:
         """Gate the capture loop. Discord-layer wires its TTS busy signal here."""
@@ -164,9 +219,10 @@ class SystemAudioListener(QObject):
             # half a sentence into the response after we unpause.
             self._buf = _Buffer()
         else:
-            # Schedule a delayed resume so the tail of TTS audio
-            # (which Discord may still be flushing into our headphones)
-            # doesn't get captured the moment we unpause.
+            # Clear the pause flag AND schedule a delayed resume so the
+            # tail of TTS audio (which Discord may still be flushing into
+            # our headphones) doesn't get captured the moment we unpause.
+            self._paused = False
             self._resume_after_monotonic = time.monotonic() + self._tts_tail_grace_seconds
 
     def start(self) -> None:
@@ -335,9 +391,7 @@ class SystemAudioListener(QObject):
             return self._stt_model
 
     def _transcribe_chunk(self, pcm_chunk: bytes) -> None:
-        model = self._load_stt_model()
-        if model is None:
-            return
+        # Build wav once — both paths use it
         fd, wav_path = tempfile.mkstemp(prefix="tvassist-sysaudio-", suffix=".wav")
         os.close(fd)
         try:
@@ -346,15 +400,12 @@ class SystemAudioListener(QObject):
                 wav.setsampwidth(_SAMPLE_WIDTH)
                 wav.setframerate(_SAMPLE_RATE)
                 wav.writeframes(pcm_chunk)
-            segments, _info = model.transcribe(
-                wav_path,
-                language=self._stt_language,
-                vad_filter=True,
-                beam_size=4,
-                best_of=2,
-                condition_on_previous_text=False,
-            )
-            transcript = " ".join(seg.text.strip() for seg in segments if seg.text.strip()).strip()
+
+            groq_key = self._resolve_groq_api_key()
+            if groq_key:
+                transcript = self._transcribe_via_groq(wav_path, groq_key)
+            else:
+                transcript = self._transcribe_via_local(wav_path)
         except Exception as exc:
             self.status_changed.emit(f"System audio STT failed: {exc}")
             return
@@ -374,3 +425,85 @@ class SystemAudioListener(QObject):
                     "System audio captured a chunk, but Whisper found no words. "
                     "Try speaking more clearly or lowering TVASSIST_SYSAUDIO_VAD_THRESHOLD."
                 )
+
+    def _transcribe_via_local(self, wav_path: str) -> str:
+        model = self._load_stt_model()
+        if model is None:
+            return ""
+        segments, _info = model.transcribe(
+            wav_path,
+            language=self._stt_language,
+            vad_filter=True,
+            beam_size=4,
+            best_of=2,
+            condition_on_previous_text=False,
+            initial_prompt=_TIBIA_INITIAL_PROMPT,
+        )
+        return " ".join(seg.text.strip() for seg in segments if seg.text.strip()).strip()
+
+    def _transcribe_via_groq(self, wav_path: str, api_key: str) -> str:
+        """Send the WAV chunk to Groq's Whisper-large-v3 endpoint.
+        Uses the OpenAI-compatible multipart form-data API. Falls through
+        to a status emit on any error — caller wraps in try/except."""
+        with open(wav_path, "rb") as f:
+            audio_bytes = f.read()
+
+        boundary = f"----tvassist{int(time.time() * 1000)}"
+        crlf = b"\r\n"
+        body_parts: list[bytes] = []
+
+        def _field(name: str, value: str) -> None:
+            body_parts.append(b"--" + boundary.encode() + crlf)
+            body_parts.append(
+                f'Content-Disposition: form-data; name="{name}"'.encode() + crlf + crlf
+            )
+            body_parts.append(value.encode("utf-8") + crlf)
+
+        def _file_field(name: str, filename: str, content: bytes, mime: str) -> None:
+            body_parts.append(b"--" + boundary.encode() + crlf)
+            body_parts.append(
+                f'Content-Disposition: form-data; name="{name}"; filename="{filename}"'.encode()
+                + crlf
+            )
+            body_parts.append(f"Content-Type: {mime}".encode() + crlf + crlf)
+            body_parts.append(content + crlf)
+
+        _field("model", _GROQ_MODEL)
+        if self._stt_language:
+            _field("language", self._stt_language)
+        _field("prompt", _TIBIA_INITIAL_PROMPT)
+        _field("response_format", "json")
+        _file_field("file", "chunk.wav", audio_bytes, "audio/wav")
+        body_parts.append(b"--" + boundary.encode() + b"--" + crlf)
+        body = b"".join(body_parts)
+
+        request = Request(
+            url=_GROQ_TRANSCRIBE_URL,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+            raise RuntimeError(
+                f"Groq Whisper HTTP {exc.code}: {detail[:200] or exc.reason}"
+            ) from exc
+        except URLError as exc:
+            raise RuntimeError(f"Groq Whisper network error: {exc.reason}") from exc
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Groq Whisper returned invalid JSON: {exc}") from exc
+
+        text = data.get("text") if isinstance(data, dict) else None
+        if not isinstance(text, str):
+            return ""
+        return text.strip()

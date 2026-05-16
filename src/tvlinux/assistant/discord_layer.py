@@ -13,7 +13,6 @@ import contextlib
 import json
 import os
 import re
-import subprocess
 import tempfile
 import threading
 import time
@@ -62,6 +61,48 @@ _PCM_CHANNELS = 2
 _PCM_SAMPLE_WIDTH = 2  # 16-bit signed pcm
 _PCM_BYTES_PER_SECOND = _PCM_SAMPLE_RATE * _PCM_CHANNELS * _PCM_SAMPLE_WIDTH
 _XAI_TTS_API_URL = "https://api.x.ai/v1/tts"
+
+
+def _fix_xai_wav_headers(audio_bytes: bytes) -> bytes:
+    """Rewrite the RIFF + data chunk size fields in xAI's TTS WAV output.
+
+    xAI returns valid PCM s16le 48kHz mono audio inside a WAV container,
+    but the RIFF chunk size and data chunk size fields are wrong (often
+    zero or the header advertises a length the payload doesn't match).
+    discord.FFmpegOpusAudio chokes on that and produces silent playback.
+
+    Cheaper than a tolerant ffmpeg re-mux: just patch the two size fields
+    so they reflect the real payload length. Saves ~100ms per sentence
+    that we'd otherwise spend forking ffmpeg.
+
+    If the input doesn't look like a WAV with a data chunk, return as-is
+    and let the caller handle whatever fails downstream.
+    """
+    if len(audio_bytes) < 44 or audio_bytes[:4] != b"RIFF" or audio_bytes[8:12] != b"WAVE":
+        return audio_bytes
+    # Find the data chunk. It's usually at offset 36 but xAI sometimes
+    # adds an optional 'fact' chunk between fmt and data — scan to be safe.
+    pos = 12
+    data_pos = -1
+    data_size = 0
+    while pos + 8 <= len(audio_bytes):
+        chunk_id = audio_bytes[pos : pos + 4]
+        chunk_size = int.from_bytes(audio_bytes[pos + 4 : pos + 8], "little")
+        if chunk_id == b"data":
+            data_pos = pos + 8
+            data_size = len(audio_bytes) - data_pos
+            break
+        # Step over this chunk (chunks are padded to even length)
+        pos += 8 + chunk_size + (chunk_size & 1)
+    if data_pos < 0:
+        return audio_bytes
+    # Patch RIFF size (= total file size - 8) and data chunk size
+    fixed = bytearray(audio_bytes)
+    fixed[4:8] = (len(audio_bytes) - 8).to_bytes(4, "little")
+    fixed[data_pos - 4 : data_pos] = data_size.to_bytes(4, "little")
+    return bytes(fixed)
+
+
 _XAI_TTS_VOICES = {"ara", "eve", "leo", "rex", "sal"}
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 _MARKDOWN_RE = re.compile(r"[*_`~#>|]+")
@@ -151,6 +192,17 @@ class DiscordVoiceLayer(QObject):
         self._sink: Any | None = None
         self._state_lock = threading.Lock()
         self._tts_lock: asyncio.Lock | None = None
+        # FIFO playback chain: each speak_in_call captures the previous
+        # call's completion Event before it starts synth, then waits for
+        # that Event before playing. Preserves call order even though
+        # synthesis runs in parallel across calls.
+        self._tts_last_complete: asyncio.Event | None = None
+        # Generation counter for cancel_speech. Each _play_tts captures
+        # the current generation at submission; if it changes (because
+        # cancel_speech bumped it), the coro bails before playing. This
+        # halts not just the currently-speaking sentence but ALL queued
+        # sentences from a barge-in "shut up" command.
+        self._tts_generation = 0
         self._listen_enabled = True
         self._stt_model: Any | None = None
         self._stt_model_lock = threading.Lock()
@@ -304,19 +356,28 @@ class DiscordVoiceLayer(QObject):
         self._run_coro_threadsafe(self._play_tts(cleaned))
 
     def cancel_speech(self) -> bool:
-        """Halt any in-flight TTS playback. Returns True if something was actively
-        speaking. Called by the barge-in path when the user says 'stop' / 'shut up'
-        into their mic during the bot's TTS."""
+        """Halt all in-flight + queued TTS. Returns True if something was being
+        spoken or queued. Called by the barge-in path when the user says
+        'stop' / 'shut up' into their mic during the bot's TTS.
+
+        Bumps the generation counter to invalidate every coro that's still
+        waiting in the FIFO chain (synthesis-done but waiting for a slot,
+        OR mid-synth). Plus halts the currently-playing audio via vc.stop()."""
+        # Always bump generation — invalidates queued + in-flight coros even
+        # if nothing is currently playing yet (e.g., they're all in synth).
+        self._tts_generation += 1
         vc = self._voice_client
-        if vc is None or not vc.is_connected():
-            return False
-        if not vc.is_playing():
-            return False
-        with contextlib.suppress(Exception):
-            vc.stop()  # invokes the after-callback with no exception, which
-            # naturally fires tts_busy_changed(False) and unpauses sysaudio.
-        self.status_changed.emit("Speech aborted on user request.")
-        return True
+        was_speaking = False
+        if vc is not None and vc.is_connected() and vc.is_playing():
+            with contextlib.suppress(Exception):
+                vc.stop()  # invokes after-callback, fires tts_busy_changed(False)
+            was_speaking = True
+        self.status_changed.emit(
+            "Speech aborted on user request — queued sentences cancelled."
+            if was_speaking
+            else "Speech queue cleared on user request."
+        )
+        return was_speaking
 
     def join_call(self, *, token: str, channel_id: int) -> None:
         """Start Discord client if needed, then join/move into `channel_id`."""
@@ -751,139 +812,162 @@ class DiscordVoiceLayer(QObject):
             return self._stt_model
 
     async def _play_tts(self, text: str) -> None:
-        lock = self._tts_lock
-        if lock is None:
-            lock = asyncio.Lock()
-            self._tts_lock = lock
-        async with lock:
-            vc = self._voice_client
-            if vc is None or not vc.is_connected():
-                self.status_changed.emit("Bot is not in a voice channel.")
-                return
-            snippet = _normalize_tts_text(text)
-            if not snippet:
-                return
-            if len(snippet) > 1500:
-                snippet = snippet[:1500].rsplit(" ", 1)[0] + "..."
+        # PHASE 0: reserve a playback slot in FIFO order BEFORE synthesis.
+        # Each coroutine grabs the previous coroutine's "done" Event and
+        # publishes its own. This preserves call order even though synth
+        # runs in parallel — if sentence N+1's synth finishes before N's,
+        # it still has to await N's Event before playing.
+        my_done = asyncio.Event()
+        prev_done = self._tts_last_complete
+        self._tts_last_complete = my_done
+        # Capture the generation at submission. If cancel_speech() bumps
+        # the counter before we get to play, we bail without speaking —
+        # that's how "shut up" kills not just the currently-playing
+        # sentence but the entire queued tail of a streamed response.
+        my_generation = self._tts_generation
 
-            xai_api_key = self._resolve_xai_tts_api_key()
-            use_xai_tts = bool(xai_api_key)
-            suffix = ".wav" if use_xai_tts else ".mp3"
-            fd, audio_path = tempfile.mkstemp(prefix="tvassist-discord-tts-", suffix=suffix)
-            os.close(fd)
-            was_listening = False
-            try:
-                if use_xai_tts:
-                    audio_bytes = await asyncio.to_thread(
-                        self._synthesize_with_xai_tts,
-                        snippet,
-                        xai_api_key,
-                    )
-                    # xAI's WAV stream ships with malformed RIFF/data chunk
-                    # sizes ("Packet corrupt", "Estimating duration from
-                    # bitrate" warnings). Discord's FFmpegOpusAudio inherits
-                    # those parse errors and produces silent playback.
-                    # Normalize the WAV by re-muxing through a tolerant ffmpeg
-                    # pass before handing it to discord.
-                    raw_path = audio_path + ".raw"
-                    with open(raw_path, "wb") as audio_file:
-                        audio_file.write(audio_bytes)
-                    try:
-                        await asyncio.to_thread(
-                            subprocess.run,
-                            [
-                                "ffmpeg",
-                                "-y",
-                                "-nostdin",
-                                "-loglevel",
-                                "error",
-                                "-err_detect",
-                                "ignore_err",
-                                "-fflags",
-                                "+discardcorrupt",
-                                "-i",
-                                raw_path,
-                                "-c:a",
-                                "pcm_s16le",
-                                "-ar",
-                                "48000",
-                                "-ac",
-                                "1",
-                                audio_path,
-                            ],
-                            check=True,
-                            timeout=30,
-                        )
-                    finally:
-                        with contextlib.suppress(Exception):
-                            os.remove(raw_path)
-                else:
-                    if edge_tts is None:
-                        self.status_changed.emit(
-                            "No TTS backend available. Set XAI_API_KEY or install edge-tts."
-                        )
-                        return
-                    communicate = edge_tts.Communicate(
-                        text=snippet,
-                        voice=self._tts_voice,
-                        rate=self._tts_rate,
-                        pitch=self._tts_pitch,
-                        volume=self._tts_volume,
-                    )
-                    await communicate.save(audio_path)
+        # PHASE 1: synthesize. Multiple speak_in_call coros can be in synth
+        # simultaneously — no lock here. Each pre-generates its audio file
+        # so that when its play slot opens, playback starts instantly.
+        vc = self._voice_client
+        if vc is None or not vc.is_connected():
+            self.status_changed.emit("Bot is not in a voice channel.")
+            my_done.set()
+            return
+        snippet = _normalize_tts_text(text)
+        if not snippet:
+            my_done.set()
+            return
+        if len(snippet) > 1500:
+            snippet = snippet[:1500].rsplit(" ", 1)[0] + "..."
 
-                if voice_recv is not None and isinstance(vc, voice_recv.VoiceRecvClient):
-                    with contextlib.suppress(Exception):
-                        if vc.is_listening():
-                            vc.stop_listening()
-                            was_listening = True
-
-                loop = asyncio.get_running_loop()
-                done = loop.create_future()
-
-                def _after(err: Exception | None) -> None:
-                    if err is not None:
-                        if not done.done():
-                            loop.call_soon_threadsafe(done.set_exception, RuntimeError(str(err)))
-                        return
-                    if not done.done():
-                        loop.call_soon_threadsafe(done.set_result, None)
-
-                target_bitrate = self._target_tts_bitrate_kbps(vc)
-                if (
-                    target_bitrate <= 56
-                    and (time.monotonic() - self._last_low_bitrate_warn_at) >= 90.0
-                ):
-                    self._last_low_bitrate_warn_at = time.monotonic()
-                    self.status_changed.emit(
-                        "Discord channel bitrate is low; voice quality is constrained by channel settings."
-                    )
-                source = discord.FFmpegOpusAudio(
-                    audio_path,
-                    bitrate=target_bitrate,
-                    before_options="-nostdin -thread_queue_size 512",
-                    options=(
-                        "-application voip -vbr constrained -compression_level 10 "
-                        "-packet_loss 0 -fec false -frame_duration 20"
-                    ),
+        xai_api_key = self._resolve_xai_tts_api_key()
+        use_xai_tts = bool(xai_api_key)
+        suffix = ".wav" if use_xai_tts else ".mp3"
+        fd, audio_path = tempfile.mkstemp(prefix="tvassist-discord-tts-", suffix=suffix)
+        os.close(fd)
+        try:
+            if use_xai_tts:
+                audio_bytes = await asyncio.to_thread(
+                    self._synthesize_with_xai_tts,
+                    snippet,
+                    xai_api_key,
                 )
-                self.tts_busy_changed.emit(True)
-                vc.play(source, after=_after)
-                try:
-                    await done
-                finally:
-                    self.tts_busy_changed.emit(False)
-            except Exception as exc:
-                self.status_changed.emit(f"Discord playback failed: {exc}")
-                # Defensive: in case we emitted True but raised before False.
-                with contextlib.suppress(Exception):
-                    self.tts_busy_changed.emit(False)
-            finally:
-                with contextlib.suppress(Exception):
-                    os.remove(audio_path)
-                if was_listening and self._listen_enabled:
+                # xAI's WAV stream ships with malformed RIFF/data chunk
+                # sizes (the size fields don't match the actual payload).
+                # discord.FFmpegOpusAudio would parse those wrong and
+                # produce silent playback. Fix the headers in pure Python
+                # instead of running a tolerant ffmpeg pass — saves the
+                # ~100ms subprocess fork + ffmpeg parse cost per sentence.
+                fixed = _fix_xai_wav_headers(audio_bytes)
+                with open(audio_path, "wb") as audio_file:
+                    audio_file.write(fixed)
+            else:
+                if edge_tts is None:
+                    self.status_changed.emit(
+                        "No TTS backend available. Set XAI_API_KEY or install edge-tts."
+                    )
                     with contextlib.suppress(Exception):
-                        await self._ensure_listening()
+                        os.remove(audio_path)
+                    return
+                communicate = edge_tts.Communicate(
+                    text=snippet,
+                    voice=self._tts_voice,
+                    rate=self._tts_rate,
+                    pitch=self._tts_pitch,
+                    volume=self._tts_volume,
+                )
+                await communicate.save(audio_path)
+        except Exception as exc:
+            self.status_changed.emit(f"Discord TTS synth failed: {exc}")
+            with contextlib.suppress(Exception):
+                os.remove(audio_path)
+            my_done.set()
+            return
+
+        # Check generation after synth — barge-in during synth should drop
+        # this coro without playing anything.
+        if my_generation != self._tts_generation:
+            with contextlib.suppress(Exception):
+                os.remove(audio_path)
+            my_done.set()
+            return
+
+        # PHASE 2: wait for my turn in the FIFO chain, then play. Synth ran
+        # in parallel with sibling coros; here we block on the previous
+        # slot's completion Event so playback is strictly in submission
+        # order regardless of whose synth finished first.
+        if prev_done is not None:
+            await prev_done.wait()
+
+        # Check generation again after waiting — barge-in could have fired
+        # while we were blocked on the previous slot.
+        if my_generation != self._tts_generation:
+            with contextlib.suppress(Exception):
+                os.remove(audio_path)
+            my_done.set()
+            return
+
+        vc = self._voice_client
+        if vc is None or not vc.is_connected():
+            self.status_changed.emit("Bot is not in a voice channel.")
+            with contextlib.suppress(Exception):
+                os.remove(audio_path)
+            my_done.set()
+            return
+        was_listening = False
+        try:
+            if voice_recv is not None and isinstance(vc, voice_recv.VoiceRecvClient):
+                with contextlib.suppress(Exception):
+                    if vc.is_listening():
+                        vc.stop_listening()
+                        was_listening = True
+
+            loop = asyncio.get_running_loop()
+            done = loop.create_future()
+
+            def _after(err: Exception | None) -> None:
+                if err is not None:
+                    if not done.done():
+                        loop.call_soon_threadsafe(done.set_exception, RuntimeError(str(err)))
+                    return
+                if not done.done():
+                    loop.call_soon_threadsafe(done.set_result, None)
+
+            target_bitrate = self._target_tts_bitrate_kbps(vc)
+            if target_bitrate <= 56 and (time.monotonic() - self._last_low_bitrate_warn_at) >= 90.0:
+                self._last_low_bitrate_warn_at = time.monotonic()
+                self.status_changed.emit(
+                    "Discord channel bitrate is low; voice quality is constrained by channel settings."
+                )
+            source = discord.FFmpegOpusAudio(
+                audio_path,
+                bitrate=target_bitrate,
+                before_options="-nostdin -thread_queue_size 512",
+                options=(
+                    "-application voip -vbr constrained -compression_level 10 "
+                    "-packet_loss 0 -fec false -frame_duration 20"
+                ),
+            )
+            self.tts_busy_changed.emit(True)
+            vc.play(source, after=_after)
+            try:
+                await done
+            finally:
+                self.tts_busy_changed.emit(False)
+        except Exception as exc:
+            self.status_changed.emit(f"Discord playback failed: {exc}")
+            # Defensive: in case we emitted True but raised before False.
+            with contextlib.suppress(Exception):
+                self.tts_busy_changed.emit(False)
+        finally:
+            with contextlib.suppress(Exception):
+                os.remove(audio_path)
+            if was_listening and self._listen_enabled:
+                with contextlib.suppress(Exception):
+                    await self._ensure_listening()
+            # Release the next slot in the chain
+            my_done.set()
 
     def _synthesize_with_xai_tts(self, text: str, api_key: str) -> bytes:
         voice_id = self._tts_voice.strip().lower()

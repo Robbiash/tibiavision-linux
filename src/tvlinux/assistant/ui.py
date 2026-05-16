@@ -187,6 +187,17 @@ class AssistantWindow(QMainWindow):
         self._model.setToolTip("Model is locked to grok unhinged.")
         layout.addRow("Model", self._model)
 
+        self._groq_api_key = QLineEdit(box)
+        self._groq_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._groq_api_key.setPlaceholderText(
+            "GROQ_API_KEY (optional — enables cloud Whisper-large-v3 for STT)"
+        )
+        self._groq_api_key.setToolTip(
+            "When set, system-audio capture uses Groq's Whisper-large-v3 endpoint "
+            "(~95% accuracy, ~0.3s/chunk, ~$0.04/hour audio). Empty = local Whisper small."
+        )
+        layout.addRow("Groq API key", self._groq_api_key)
+
         self._discord_token = QLineEdit(box)
         self._discord_token.setEchoMode(QLineEdit.EchoMode.Password)
         self._discord_token.setPlaceholderText("DISCORD_BOT_TOKEN")
@@ -421,6 +432,7 @@ class AssistantWindow(QMainWindow):
             or _DEFAULT_DISCORD_TTS_PRESET
         )
         sysaudio_listen = bool(self._settings.value("assistant/sysaudio_listen", False, bool))
+        saved_groq_key = str(self._settings.value("assistant/groq_api_key", "", str) or "")
 
         # Older defaults required a wake word ("svetlana"), which can make the bot seem deaf.
         if discord_require_wake and discord_wake_word.strip().lower() == "svetlana":
@@ -428,6 +440,7 @@ class AssistantWindow(QMainWindow):
             self._settings.setValue("assistant/discord_require_wake", False)
 
         self._api_key.setText(saved_key)
+        self._groq_api_key.setText(saved_groq_key)
         self._model.setText(_FORCED_MODEL)
         self._read_aloud.setChecked(read_aloud)
         self._dictate_seconds.setValue(max(3, min(20, dictate_seconds)))
@@ -447,6 +460,10 @@ class AssistantWindow(QMainWindow):
         self._client.set_model(_FORCED_MODEL)
         self._settings.setValue("assistant/model", _FORCED_MODEL)
         self._discord.set_listening_enabled(discord_auto_listen)
+        # Push Groq key to both sysaudio listeners (monitor + mic). Empty
+        # string falls back to local Whisper inside each listener.
+        self._sysaudio.set_groq_api_key(saved_groq_key)
+        self._sysaudio_mic.set_groq_api_key(saved_groq_key)
         # Wire the system-audio toggle last so the start() side effect
         # only fires after everything else is settled.
         self._sysaudio_listen.setChecked(sysaudio_listen)
@@ -486,6 +503,14 @@ class AssistantWindow(QMainWindow):
             self._client.set_api_key(os.environ.get("XAI_API_KEY", ""))
             self._settings.remove("assistant/api_key")
         self._discord.set_xai_api_key(self._client.api_key or "")
+        # Groq key for sysaudio Whisper (independent from xAI key).
+        groq_key = self._groq_api_key.text().strip()
+        if groq_key:
+            self._settings.setValue("assistant/groq_api_key", groq_key)
+        else:
+            self._settings.remove("assistant/groq_api_key")
+        self._sysaudio.set_groq_api_key(groq_key)
+        self._sysaudio_mic.set_groq_api_key(groq_key)
         self._settings.setValue("assistant/model", model)
         discord_token = self._discord_token.text().strip()
         if discord_token:
@@ -1100,7 +1125,10 @@ _SENTENCE_END_RE = re.compile(r"(?<![0-9])[.!?]+[\"')\]]*\s+")
 # A sentence shorter than this many characters won't be flushed to TTS —
 # instead we wait for more tokens to arrive. Avoids one-word/two-word
 # micro-emissions that make playback choppy ("Yeah." → "Right.").
-_SENTENCE_MIN_CHARS = 25
+# Lowered from 25 to 12 to drop first-TTS latency by ~100-200ms — a
+# "Sure thing." (10 chars) used to wait for batching but now flushes
+# immediately. Still high enough to avoid one-word micro-utterances.
+_SENTENCE_MIN_CHARS = 12
 
 
 class _SentenceStreamer:

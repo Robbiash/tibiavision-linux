@@ -10,19 +10,44 @@ from ..paths import data_dir
 __all__ = ["build_system_prompt", "load_persistent_context"]
 
 
+# Cached persistent context. Re-reads disk only when a file's mtime
+# changes (i.e., the user edits one of the .md files). Without this we'd
+# read and parse every .md file from disk on every Grok call, adding
+# 50-100ms of latency for no reason.
+_PERSISTENT_CTX_CACHE: tuple[float, str] | None = None
+# Lock not needed — Python's GIL makes the tuple assignment atomic for
+# our purposes (worst case is a redundant re-read, not a corrupt cache).
+
+
 def load_persistent_context() -> str:
-    """Load every .md file from ~/.config/tibiavision-linux/context/ and
-    concatenate as a single context block. Returns empty string if the
+    """Load every .md file from ~/.local/share/tibiavision-linux/context/
+    and concatenate as a single context block. Returns empty string if the
     directory doesn't exist. Each file is shown with its filename header.
 
     Use this for stuff Svetlana should know on EVERY conversation: your
     Tibia chars, your friends, running jokes, Tibia primer, etc.
+
+    Cached by mtime — file edits are picked up on next call but otherwise
+    we serve from memory.
     """
+    global _PERSISTENT_CTX_CACHE
     ctx_dir = data_dir() / "context"
     if not ctx_dir.exists():
         return ""
+    files = sorted(ctx_dir.glob("*.md"))
+    if not files:
+        return ""
+    # Use max mtime across all files as the cache key — any edit
+    # invalidates. Cheap stat() calls, no read until needed.
+    try:
+        max_mtime = max(p.stat().st_mtime for p in files)
+    except OSError:
+        max_mtime = 0.0
+    cached = _PERSISTENT_CTX_CACHE
+    if cached is not None and cached[0] == max_mtime:
+        return cached[1]
     parts: list[str] = []
-    for path in sorted(ctx_dir.glob("*.md")):
+    for path in files:
         try:
             body = path.read_text(encoding="utf-8").strip()
         except Exception:
@@ -37,7 +62,9 @@ def load_persistent_context() -> str:
         if not body:
             continue
         parts.append(f"### {path.stem}\n{body}")
-    return "\n\n".join(parts)
+    result = "\n\n".join(parts)
+    _PERSISTENT_CTX_CACHE = (max_mtime, result)
+    return result
 
 
 _BASE_PERSONA = """
